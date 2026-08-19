@@ -1,0 +1,7 @@
+{"timestamp":"2026-08-20T10:00:00Z","level":"INFO","service":"gateway","trace_id":"abc123","endpoint":"POST /checkout","latency_ms":42,"message":"request accepted"}
+{"timestamp":"2026-08-20T10:00:01Z","level":"WARN","service":"orders","trace_id":"abc123","endpoint":"POST /orders","latency_ms":180,"message":"database pool is 80 percent utilized"}
+{"timestamp":"2026-08-20T10:00:02Z","level":"ERROR","service":"orders","trace_id":"abc123","endpoint":"POST /orders","latency_ms":1200,"message":"query timeout after 1200 ms for order 9812","stack_trace":"DatabaseError: timeout\nCaused by: ConnectionTimeout at 0x7ff123"}
+{"timestamp":"2026-08-20T10:01:00Z","level":"INFO","service":"gateway","trace_id":"def456","endpoint":"GET /health","latency_ms":8,"message":"ok"}
+{"timestamp":"2026-08-20T10:02:00Z","level":"ERROR","service":"orders","trace_id":"ghi789","endpoint":"POST /orders","latency_ms":1350,"message":"query timeout after 1350 ms for order 10421","stack_trace":"DatabaseError: timeout\nCaused by: ConnectionTimeout at 0x9aa456"}
+{"timestamp":"2026-08-20T10:03:00Z","level":"ERROR","service":"orders","trace_id":"jkl012","endpoint":"POST /orders","latency_ms":1410,"message":"query timeout after 1410 ms for order 10599","stack_trace":"DatabaseError: timeout\nCaused by: ConnectionTimeout at 0x8bb777"}
+not-json
