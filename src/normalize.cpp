@@ -10,15 +10,30 @@ namespace {
 
 std::string root_cause_line(std::string_view message, std::string_view stack) {
   std::string candidate(message);
+  std::string first_frame;
   std::size_t position = 0;
   while (position < stack.size()) {
     const auto end = stack.find('\n', position);
     auto line = stack.substr(position, end == std::string_view::npos ? stack.size() - position
                                                                     : end - position);
+    while (!line.empty() && std::isspace(static_cast<unsigned char>(line.front())))
+      line.remove_prefix(1);
+    while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back())))
+      line.remove_suffix(1);
     const auto caused = line.find("Caused by:");
-    if (caused != std::string_view::npos) candidate.assign(line.substr(caused + 10));
+    if (caused != std::string_view::npos) {
+      candidate.assign(line.substr(caused + 10));
+    } else {
+      const auto colon = line.find(':');
+      const auto type = colon == std::string_view::npos ? line : line.substr(0, colon);
+      if (type.ends_with("Exception") || type.ends_with("Error"))
+        candidate.assign(line);
+    }
+    if (first_frame.empty() && line.starts_with("at "))
+      first_frame.assign(line.substr(3));
     position = end == std::string_view::npos ? stack.size() : end + 1;
   }
+  if (!first_frame.empty()) candidate += " @ " + first_frame;
   return candidate;
 }
 

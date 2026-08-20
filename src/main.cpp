@@ -11,27 +11,30 @@
 
 namespace {
 
-constexpr std::string_view usage = R"(LogScope++ 0.1.0 (Day 1)
+constexpr std::string_view usage = R"(LogScope++ 0.2.0
 
 Usage:
-  logscope analyze FILE [FILTERS] [--limit N] [--format text|markdown]
-  logscope errors  FILE [FILTERS] [--group-by error|service|endpoint] [--limit N]
-  logscope latency FILE [FILTERS] [--group-by endpoint|service] [--limit N]
+  logscope analyze FILE [FILTERS] [--format text|markdown|json]
+  logscope errors  FILE [FILTERS] [--group-by error|service|endpoint]
+  logscope latency FILE [FILTERS] [--group-by endpoint|service]
 
 Filters:
-  --from TIMESTAMP       Include timestamps >= this ISO-8601 value
-  --to TIMESTAMP         Include timestamps <= this ISO-8601 value
+  --from TIMESTAMP       Include normalized timestamps >= this value
+  --to TIMESTAMP         Include normalized timestamps <= this value
   --level LEVEL          Match a severity exactly (case-insensitive)
   --service SERVICE      Match a service exactly
   --trace-id ID          Match a trace ID exactly
   --text TEXT            Search message and stack trace (case-insensitive)
 
-Expected JSON fields:
-  timestamp, level, service, trace_id, latency_ms, message, endpoint, stack_trace
+Input:
+  --input-format FORMAT  auto|jsonl|app-export|logback|spark-syslog
+  --timezone SUFFIX      Append an offset to Spark timestamps, for example +08:00
+  --io buffered|mmap     Select the input ownership strategy
 
 Notes:
-  "recent" compares the second half of the input with the first half.
-  Malformed JSON lines are counted and skipped.
+  Auto detection supports JSONL, enriched application exports, raw Logback,
+  raw Spark syslog, and browser-saved Spark syslog inside an HTML xmp element.
+  "recent" compares chronological halves, including reverse-ordered exports.
 )";
 
 struct Cli {
@@ -54,13 +57,23 @@ std::size_t parse_size(std::string_view value, std::string_view option) {
   return parsed;
 }
 
+logscope::InputFormat parse_input_format(std::string_view value) {
+  if (value == "auto") return logscope::InputFormat::auto_detect;
+  if (value == "jsonl") return logscope::InputFormat::jsonl;
+  if (value == "app-export") return logscope::InputFormat::app_export;
+  if (value == "logback") return logscope::InputFormat::logback;
+  if (value == "spark-syslog") return logscope::InputFormat::spark_syslog;
+  throw std::runtime_error(
+      "--input-format must be auto, jsonl, app-export, logback, or spark-syslog");
+}
+
 Cli parse_cli(int argc, char** argv) {
   if (argc < 2 || std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h") {
     std::cout << usage;
     std::exit(0);
   }
   if (std::string_view(argv[1]) == "--version") {
-    std::cout << "logscope 0.1.0\n";
+    std::cout << "logscope 0.2.0\n";
     std::exit(0);
   }
   if (argc < 3) throw std::runtime_error("a command and input file are required");
@@ -69,7 +82,7 @@ Cli parse_cli(int argc, char** argv) {
   cli.command = argv[1];
   cli.file = argv[2];
   if (cli.command != "analyze" && cli.command != "errors" && cli.command != "latency")
-    throw std::runtime_error("unknown Day 1 command: " + cli.command);
+    throw std::runtime_error("unknown command: " + cli.command);
   cli.render.group_by = cli.command == "errors" ? "error" : "endpoint";
 
   for (int index = 3; index < argc; ++index) {
@@ -82,11 +95,23 @@ Cli parse_cli(int argc, char** argv) {
     else if (option == "--text") cli.analysis.filters.text = require_value(argc, argv, index, option);
     else if (option == "--group-by") cli.render.group_by = require_value(argc, argv, index, option);
     else if (option == "--limit") cli.render.limit = parse_size(require_value(argc, argv, index, option), option);
+    else if (option == "--input-format")
+      cli.analysis.input_format =
+          parse_input_format(require_value(argc, argv, index, option));
+    else if (option == "--timezone")
+      cli.analysis.default_timezone = require_value(argc, argv, index, option);
+    else if (option == "--io") {
+      const auto value = require_value(argc, argv, index, option);
+      if (value == "buffered") cli.analysis.io_mode = logscope::IoMode::buffered;
+      else if (value == "mmap") cli.analysis.io_mode = logscope::IoMode::mmap;
+      else throw std::runtime_error("--io must be buffered or mmap");
+    }
     else if (option == "--format") {
       const auto value = require_value(argc, argv, index, option);
       if (value == "text") cli.render.format = logscope::OutputFormat::text;
       else if (value == "markdown") cli.render.format = logscope::OutputFormat::markdown;
-      else throw std::runtime_error("--format must be text or markdown in the Day 1 build");
+      else if (value == "json") cli.render.format = logscope::OutputFormat::json;
+      else throw std::runtime_error("--format must be text, markdown, or json");
     } else if (option == "--help" || option == "-h") {
       std::cout << usage;
       std::exit(0);

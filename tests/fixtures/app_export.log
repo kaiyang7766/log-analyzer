@@ -1,0 +1,13 @@
+DEBUG 2026-08-19 15:28:05.869+08:00 Engine.java:10 192.0.2.10 demo.migration trace-b default zone lf 0 _podname=demo-1 _env=test _threadName=worker-2 _msg=DEBUG 2026-08-19 15:28:05.869 [trace-b] [100:200] 192.0.2.10 demo.migration default zone [worker-2] demo.Engine 10 [MigrationFlow:100][ResumeStep:200] Persisting task, state Failed
+
+ERROR 2026-08-19 15:28:05.859+08:00 Engine.java:20 192.0.2.10 demo.migration trace-b default zone lf 0 _podname=demo-1 _env=test _threadName=worker-2 _msg=ERROR 2026-08-19 15:28:05.859 [trace-b] [100:200] 192.0.2.10 demo.migration default zone [worker-2] demo.Engine 20 [MigrationFlow:100][ResumeStep:200] Exception when execute step, round: 2
+demo.BusinessException: required configuration is missing: cluster=null, topic=null
+        at demo.ResumeService.restart(ResumeService.java:30)
+
+INFO 2026-08-19 15:28:05.616+08:00 Engine.java:15 192.0.2.10 demo.migration trace-b default zone lf 0 _podname=demo-1 _env=test _threadName=worker-2 _msg=INFO 2026-08-19 15:28:05.616 [trace-b] [100:200] 192.0.2.10 demo.migration default zone [worker-2] demo.Engine 15 [MigrationFlow:100][ResumeStep:200] Executing task, round: 2
+
+ERROR 2026-08-19 15:27:45.556+08:00 Engine.java:20 192.0.2.11 demo.migration trace-a default zone lf 0 _podname=demo-2 _env=test _threadName=worker-1 _msg=ERROR 2026-08-19 15:27:45.556 [trace-a] [100:200] 192.0.2.11 demo.migration default zone [worker-1] demo.Engine 20 [MigrationFlow:100][ResumeStep:200] Exception when execute step, round: 1
+demo.BusinessException: required configuration is missing: cluster=null, topic=null
+        at demo.ResumeService.restart(ResumeService.java:30)
+
+INFO 2026-08-19 15:27:45.280+08:00 Engine.java:15 192.0.2.11 demo.migration trace-a default zone lf 0 _podname=demo-2 _env=test _threadName=worker-1 _msg=INFO 2026-08-19 15:27:45.280 [trace-a] [100:200] 192.0.2.11 demo.migration default zone [worker-1] demo.Engine 15 [MigrationFlow:100][ResumeStep:200] Executing task, round: 1
