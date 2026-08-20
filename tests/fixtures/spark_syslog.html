@@ -1,0 +1,12 @@
+<!-- sanitized browser-saved YARN syslog -->
+<html><body><pre><xmp>
+26/08/20 07:24:02.012 Driver WARN SparkTaskDriver: Cannot guarantee consistency of optional config. Please ignore this log, it is not the reason for task failure.
+java.util.NoSuchElementException: optional.config
+        at demo.SparkDriver.configure(SparkDriver.scala:10)
+26/08/20 07:24:02.250 Driver INFO SparkContext: Submitted application: demo_query
+26/08/20 07:24:03.100 dag-scheduler-event-loop INFO DAGScheduler: ShuffleMapStage 1 finished in 0.850 s
+26/08/20 07:24:03.101 task-result-getter-0 INFO TaskSetManager: Finished task 0.0 in stage 1.0 (TID 1) in 800 ms on worker.example (executor 2) (1/1)
+26/08/20 07:24:03.200 Driver INFO DAGScheduler: Job 1 finished: save at Demo.scala:20, took 1.000 s
+26/08/20 07:24:03.300 timeout-circuit A diagnostic thread name with spaces INFO ResourceManager: Successfully recovered a resource
+26/08/20 07:24:03.400 Driver INFO ApplicationMaster: Final app status: SUCCEEDED, exitCode: 0, sparkExitCode: 0
+</xmp></pre></body></html>

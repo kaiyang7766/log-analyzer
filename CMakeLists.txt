@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(logscope VERSION 0.1.0 LANGUAGES CXX)
+project(logscope VERSION 0.2.0 LANGUAGES CXX)
 
 option(LOGSCOPE_BUILD_TESTS "Build the test suite" ON)
 option(LOGSCOPE_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -33,6 +33,7 @@ endif()
 add_library(logscope_core
   src/analyzer.cpp
   src/config.cpp
+  src/formats.cpp
   src/input.cpp
   src/normalize.cpp
   src/output.cpp)

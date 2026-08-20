@@ -1,30 +1,46 @@
 #include "logscope/analyzer.h"
 
-#include <simdjson.h>
-
 #include <algorithm>
-#include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "formats.h"
 #include "input.h"
 
 namespace logscope {
 namespace {
 
 struct Shard {
-  std::uint64_t lines = 0;
   std::uint64_t matched = 0;
-  std::uint64_t malformed = 0;
+  std::uint64_t warnings = 0;
+  std::uint64_t error_events = 0;
+  std::uint64_t exception_events = 0;
+  std::uint64_t advisory_events = 0;
+  std::uint64_t completed_jobs = 0;
+  std::uint64_t completed_stages = 0;
+  std::uint64_t completed_tasks = 0;
+  std::uint64_t failed_jobs = 0;
+  std::uint64_t failed_stages = 0;
+  std::uint64_t failed_tasks = 0;
+  bool saw_terminal_success = false;
+  bool saw_terminal_failure = false;
+  bool saw_failure_evidence = false;
+  std::string terminal_evidence;
+  std::unordered_map<std::string, std::uint32_t> retry_rounds;
   std::unordered_map<std::string, std::uint64_t> services;
   std::unordered_map<std::string, std::uint64_t> endpoints;
+  std::unordered_map<std::string, std::uint64_t> loggers;
+  std::unordered_map<std::string, std::uint64_t> states;
+  std::unordered_map<std::string, std::uint64_t> warning_patterns;
   std::unordered_map<std::string, ErrorStats> errors;
   std::unordered_map<std::string, std::vector<double>> endpoint_latencies;
   std::unordered_map<std::string, std::vector<double>> service_latencies;
@@ -43,46 +59,6 @@ bool contains_case_insensitive(std::string_view haystack, std::string_view needl
   return lower(haystack).find(lower(needle)) != std::string::npos;
 }
 
-std::string string_field(const simdjson::dom::object& object, std::string_view key) {
-  simdjson::dom::element element;
-  if (object.at_key(key).get(element)) return {};
-  std::string_view text;
-  if (!element.get_string().get(text)) return std::string(text);
-  std::int64_t integer = 0;
-  if (!element.get_int64().get(integer)) return std::to_string(integer);
-  std::uint64_t unsigned_integer = 0;
-  if (!element.get_uint64().get(unsigned_integer)) return std::to_string(unsigned_integer);
-  double number = 0.0;
-  if (!element.get_double().get(number)) return std::to_string(number);
-  return {};
-}
-
-double number_field(const simdjson::dom::object& object, std::string_view key) {
-  simdjson::dom::element element;
-  if (object.at_key(key).get(element)) return -1.0;
-  double number = 0.0;
-  if (!element.get_double().get(number)) return number;
-  std::string_view text;
-  if (!element.get_string().get(text)) {
-    try {
-      std::size_t consumed = 0;
-      const auto parsed = std::stod(std::string(text), &consumed);
-      if (consumed == text.size()) return parsed;
-    } catch (...) {
-    }
-  }
-  return -1.0;
-}
-
-bool is_error(std::string_view severity, std::string_view message, std::string_view stack) {
-  const auto level = lower(severity);
-  return level == "error" || level == "fatal" || level == "critical" ||
-         !stack.empty() || contains_case_insensitive(message, "error") ||
-         contains_case_insensitive(message, "exception") ||
-         contains_case_insensitive(message, "timeout") ||
-         contains_case_insensitive(message, "failed");
-}
-
 bool passes_filters(const LogRecord& record, const Filters& filters) {
   if (!filters.from.empty() && record.timestamp < filters.from) return false;
   if (!filters.to.empty() && record.timestamp > filters.to) return false;
@@ -91,12 +67,31 @@ bool passes_filters(const LogRecord& record, const Filters& filters) {
   if (!filters.trace_id.empty() && record.trace_id != filters.trace_id) return false;
   if (!filters.text.empty() &&
       !contains_case_insensitive(record.message, filters.text) &&
-      !contains_case_insensitive(record.stack_trace, filters.text)) return false;
+      !contains_case_insensitive(record.stack_trace, filters.text))
+    return false;
   return true;
 }
 
+std::string compact_evidence(std::string value, std::size_t limit = 240) {
+  std::replace(value.begin(), value.end(), '\n', ' ');
+  std::replace(value.begin(), value.end(), '\r', ' ');
+  if (value.size() > limit) value = value.substr(0, limit - 3) + "...";
+  return value;
+}
+
 void consume_record(Shard& shard, LogRecord record, const AnalyzeOptions& options,
-                    std::size_t input_size) {
+                    std::size_t input_size, bool reverse_order) {
+  if (record.failure) shard.saw_failure_evidence = true;
+  if (record.terminal_success) {
+    shard.saw_terminal_success = true;
+    if (!shard.saw_terminal_failure)
+      shard.terminal_evidence = compact_evidence(record.message);
+  }
+  if (record.terminal_failure) {
+    shard.saw_terminal_failure = true;
+    shard.terminal_evidence = compact_evidence(record.message);
+  }
+
   if (!passes_filters(record, options.filters)) return;
   ++shard.matched;
 
@@ -104,63 +99,62 @@ void consume_record(Shard& shard, LogRecord record, const AnalyzeOptions& option
   const auto endpoint = record.endpoint.empty() ? "<unknown>" : record.endpoint;
   ++shard.services[service];
   ++shard.endpoints[endpoint];
+  if (!record.logger.empty()) ++shard.loggers[record.logger];
+
+  const auto level = lower(record.severity);
+  if (level == "warn" || level == "warning") {
+    ++shard.warnings;
+    ++shard.warning_patterns[normalize_error(record.message)];
+  }
+  if (record.failure) ++shard.error_events;
+  if (record.exception) ++shard.exception_events;
+  if (record.advisory) ++shard.advisory_events;
+  if (record.retry_round > 0 && record.event_kind == "workflow_attempt") {
+    std::string retry_key;
+    for (const auto key : {"flow_id", "task_instance_id", "step_id"}) {
+      if (const auto value = record.attributes.find(key);
+          value != record.attributes.end()) {
+        retry_key += value->second;
+        retry_key.push_back(':');
+      }
+    }
+    if (retry_key.empty()) retry_key = record.endpoint;
+    shard.retry_rounds[retry_key] =
+        std::max(shard.retry_rounds[retry_key], record.retry_round);
+  }
+
+  if (const auto state = record.attributes.find("state");
+      state != record.attributes.end())
+    ++shard.states[state->second];
+
+  if (record.event_kind == "job_completed") ++shard.completed_jobs;
+  else if (record.event_kind == "stage_completed") ++shard.completed_stages;
+  else if (record.event_kind == "task_completed") ++shard.completed_tasks;
+  else if (record.event_kind == "job_failed") ++shard.failed_jobs;
+  else if (record.event_kind == "stage_failed") ++shard.failed_stages;
+  else if (record.event_kind == "task_failed") ++shard.failed_tasks;
 
   if (record.latency_ms >= 0.0 && std::isfinite(record.latency_ms)) {
     shard.endpoint_latencies[endpoint].push_back(record.latency_ms);
     shard.service_latencies[service].push_back(record.latency_ms);
   }
 
-  if (is_error(record.severity, record.message, record.stack_trace)) {
+  if (record.failure) {
     const auto normalized = normalize_error(record.message, record.stack_trace);
     auto& stats = shard.errors[normalized];
     ++stats.total;
-    if (record.offset >= input_size / 2) ++stats.recent;
-    else ++stats.previous;
+    const bool in_later_half = record.offset >= input_size / 2;
+    const bool recent = reverse_order ? !in_later_half : in_later_half;
+    if (recent)
+      ++stats.recent;
+    else
+      ++stats.previous;
     ++stats.services[service];
     ++stats.endpoints[endpoint];
     if (stats.example.empty()) stats.example = record.message;
   }
 
   if (options.retain_records) shard.records.push_back(std::move(record));
-}
-
-void parse_range(const char* data, std::size_t size, std::size_t nominal_begin,
-                 std::size_t nominal_end, const AnalyzeOptions& options, Shard& shard) {
-  std::size_t begin = nominal_begin;
-  if (begin != 0) {
-    while (begin < size && data[begin - 1] != '\n') ++begin;
-  }
-
-  simdjson::dom::parser parser;
-  std::size_t cursor = begin;
-  while (cursor < size && cursor < nominal_end) {
-    const auto line_start = cursor;
-    while (cursor < size && data[cursor] != '\n') ++cursor;
-    std::string_view line(data + line_start, cursor - line_start);
-    if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
-    ++shard.lines;
-    if (!line.empty()) {
-      simdjson::padded_string padded(line);
-      simdjson::dom::element document;
-      simdjson::dom::object object;
-      if (parser.parse(padded).get(document) || document.get_object().get(object)) {
-        ++shard.malformed;
-      } else {
-        LogRecord record;
-        record.offset = line_start;
-        record.timestamp = string_field(object, options.fields.timestamp);
-        record.severity = string_field(object, options.fields.severity);
-        record.service = string_field(object, options.fields.service);
-        record.trace_id = string_field(object, options.fields.trace_id);
-        record.endpoint = string_field(object, options.fields.endpoint);
-        record.message = string_field(object, options.fields.message);
-        record.stack_trace = string_field(object, options.fields.stack_trace);
-        record.latency_ms = number_field(object, options.fields.latency_ms);
-        consume_record(shard, std::move(record), options, size);
-      }
-    }
-    if (cursor < size) ++cursor;
-  }
 }
 
 template <typename Map>
@@ -177,9 +171,57 @@ void merge_vectors(Map& destination, Map& source) {
   }
 }
 
+void merge_shard(AnalysisResult& result, Shard& shard) {
+  result.matched += shard.matched;
+  result.warnings += shard.warnings;
+  result.error_events += shard.error_events;
+  result.exception_events += shard.exception_events;
+  result.advisory_events += shard.advisory_events;
+  for (const auto& [_, round] : shard.retry_rounds)
+    result.retries += round > 0 ? round - 1 : 0;
+  result.completed_jobs += shard.completed_jobs;
+  result.completed_stages += shard.completed_stages;
+  result.completed_tasks += shard.completed_tasks;
+  result.failed_jobs += shard.failed_jobs;
+  result.failed_stages += shard.failed_stages;
+  result.failed_tasks += shard.failed_tasks;
+  merge_counts(result.services, shard.services);
+  merge_counts(result.endpoints, shard.endpoints);
+  merge_counts(result.loggers, shard.loggers);
+  merge_counts(result.states, shard.states);
+  merge_counts(result.warning_patterns, shard.warning_patterns);
+  merge_vectors(result.endpoint_latencies, shard.endpoint_latencies);
+  merge_vectors(result.service_latencies, shard.service_latencies);
+  for (auto& [key, stats] : shard.errors) {
+    auto& target = result.errors[key];
+    target.total += stats.total;
+    target.previous += stats.previous;
+    target.recent += stats.recent;
+    merge_counts(target.services, stats.services);
+    merge_counts(target.endpoints, stats.endpoints);
+    if (target.example.empty()) target.example = std::move(stats.example);
+  }
+  result.records.insert(result.records.end(),
+                        std::make_move_iterator(shard.records.begin()),
+                        std::make_move_iterator(shard.records.end()));
+
+  if (shard.saw_terminal_failure) {
+    result.outcome = "failed";
+    result.outcome_evidence = std::move(shard.terminal_evidence);
+  } else if (shard.saw_terminal_success && result.outcome != "failed") {
+    result.outcome = "succeeded";
+    result.outcome_evidence = std::move(shard.terminal_evidence);
+  } else if (shard.saw_failure_evidence && result.outcome == "unknown") {
+    result.outcome = "failed";
+    result.outcome_evidence =
+        "No terminal status was found; failure events were present.";
+  }
+}
+
 }  // namespace
 
-AnalysisResult analyze_file(const std::filesystem::path& path, const AnalyzeOptions& options) {
+AnalysisResult analyze_file(const std::filesystem::path& path,
+                            const AnalyzeOptions& options) {
   const auto started = std::chrono::steady_clock::now();
   detail::InputBuffer input(path, options.io_mode);
 
@@ -187,38 +229,40 @@ AnalysisResult analyze_file(const std::filesystem::path& path, const AnalyzeOpti
   result.bytes = input.size();
   if (input.size() == 0) return result;
 
-  // Day 1 deliberately runs one shard. Day 2 can schedule this range parser
-  // across std::jthreads without changing the parsing or aggregation semantics.
-  std::vector<Shard> shards(1);
-  parse_range(input.data(), input.size(), 0, input.size(), options, shards.front());
+  auto decoded =
+      detail::decode_input(std::string_view(input.data(), input.size()), options);
+  result.lines = decoded.physical_lines;
+  result.events = decoded.logical_events;
+  result.continuations = decoded.continuation_lines;
+  result.malformed = decoded.malformed;
+  result.detected_format = std::move(decoded.format_name);
+  result.container_format = std::move(decoded.container_name);
 
-  for (auto& shard : shards) {
-    result.lines += shard.lines;
-    result.matched += shard.matched;
-    result.malformed += shard.malformed;
-    merge_counts(result.services, shard.services);
-    merge_counts(result.endpoints, shard.endpoints);
-    merge_vectors(result.endpoint_latencies, shard.endpoint_latencies);
-    merge_vectors(result.service_latencies, shard.service_latencies);
-    for (auto& [key, stats] : shard.errors) {
-      auto& target = result.errors[key];
-      target.total += stats.total;
-      target.previous += stats.previous;
-      target.recent += stats.recent;
-      merge_counts(target.services, stats.services);
-      merge_counts(target.endpoints, stats.endpoints);
-      if (target.example.empty()) target.example = std::move(stats.example);
-    }
-    result.records.insert(result.records.end(), std::make_move_iterator(shard.records.begin()),
-                          std::make_move_iterator(shard.records.end()));
+  Shard shard;
+  for (auto& record : decoded.records)
+    consume_record(shard, std::move(record), options, input.size(),
+                   decoded.reverse_order);
+  merge_shard(result, shard);
+
+  if (result.outcome == "unknown" && result.matched > 0) {
+    result.outcome_evidence =
+        "No terminal success or failure marker was found.";
   }
-  std::sort(result.records.begin(), result.records.end(),
-            [](const LogRecord& left, const LogRecord& right) { return left.offset < right.offset; });
-  result.elapsed_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+
+  std::stable_sort(result.records.begin(), result.records.end(),
+                   [](const LogRecord& left, const LogRecord& right) {
+                     if (left.timestamp != right.timestamp)
+                       return left.timestamp < right.timestamp;
+                     return left.offset < right.offset;
+                   });
+  result.elapsed_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
+          .count();
   return result;
 }
 
-std::vector<LogRecord> select_trace(const AnalysisResult& result, std::string_view trace_id) {
+std::vector<LogRecord> select_trace(const AnalysisResult& result,
+                                    std::string_view trace_id) {
   std::vector<LogRecord> records;
   for (const auto& record : result.records) {
     if (record.trace_id == trace_id) records.push_back(record);
@@ -226,19 +270,20 @@ std::vector<LogRecord> select_trace(const AnalysisResult& result, std::string_vi
   return records;
 }
 
-std::vector<std::vector<LogRecord>> select_contexts(const AnalysisResult& result,
-                                                    std::string_view needle,
-                                                    std::size_t before,
-                                                    std::size_t after) {
+std::vector<std::vector<LogRecord>> select_contexts(
+    const AnalysisResult& result, std::string_view needle, std::size_t before,
+    std::size_t after) {
   std::vector<std::vector<LogRecord>> contexts;
   for (std::size_t index = 0; index < result.records.size(); ++index) {
     const auto& record = result.records[index];
     if (!contains_case_insensitive(record.message, needle) &&
-        !contains_case_insensitive(record.stack_trace, needle)) continue;
+        !contains_case_insensitive(record.stack_trace, needle))
+      continue;
     const auto start = index > before ? index - before : 0;
     const auto end = std::min(result.records.size(), index + after + 1);
-    contexts.emplace_back(result.records.begin() + static_cast<std::ptrdiff_t>(start),
-                          result.records.begin() + static_cast<std::ptrdiff_t>(end));
+    contexts.emplace_back(
+        result.records.begin() + static_cast<std::ptrdiff_t>(start),
+        result.records.begin() + static_cast<std::ptrdiff_t>(end));
   }
   return contexts;
 }

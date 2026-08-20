@@ -30,6 +30,57 @@ std::string compact(std::string value, std::size_t width = 96) {
   return value;
 }
 
+std::string markdown_cell(std::string value, std::size_t width = 96) {
+  value = compact(std::move(value), width);
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (const char ch : value) {
+    if (ch == '|') escaped.push_back('\\');
+    escaped.push_back(ch);
+  }
+  return escaped;
+}
+
+std::string json_escape(std::string_view value) {
+  std::string escaped;
+  escaped.reserve(value.size() + 8);
+  for (const unsigned char ch : value) {
+    switch (ch) {
+      case '"':
+        escaped += "\\\"";
+        break;
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '\b':
+        escaped += "\\b";
+        break;
+      case '\f':
+        escaped += "\\f";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      case '\r':
+        escaped += "\\r";
+        break;
+      case '\t':
+        escaped += "\\t";
+        break;
+      default:
+        if (ch < 0x20) {
+          constexpr char hex[] = "0123456789abcdef";
+          escaped += "\\u00";
+          escaped.push_back(hex[ch >> 4]);
+          escaped.push_back(hex[ch & 0x0f]);
+        } else {
+          escaped.push_back(static_cast<char>(ch));
+        }
+    }
+  }
+  return escaped;
+}
+
 void heading(std::ostream& out, OutputFormat format, std::string_view title) {
   if (format == OutputFormat::markdown) out << "## " << title << "\n\n";
   else out << title << "\n" << std::string(title.size(), '=') << "\n";
@@ -40,7 +91,7 @@ void render_count_table(std::ostream& out, const auto& rows, OutputFormat format
   if (format == OutputFormat::markdown) {
     out << "| " << name << " | Count |\n|---|---:|\n";
     for (std::size_t i = 0; i < std::min(limit, rows.size()); ++i)
-      out << "| " << compact(rows[i].first) << " | " << rows[i].second << " |\n";
+      out << "| " << markdown_cell(rows[i].first) << " | " << rows[i].second << " |\n";
     out << '\n';
   } else {
     for (std::size_t i = 0; i < std::min(limit, rows.size()); ++i)
@@ -78,7 +129,7 @@ void render_error_rows(std::ostream& out, const std::vector<ErrorRow>& rows,
     const auto delta = static_cast<std::int64_t>(stats->recent) -
                        static_cast<std::int64_t>(stats->previous);
     if (format == OutputFormat::markdown) {
-      out << "| " << compact(name) << " | " << stats->previous << " | " << stats->recent
+      out << "| " << markdown_cell(name) << " | " << stats->previous << " | " << stats->recent
           << " | " << std::showpos << delta << std::noshowpos << " | " << stats->total << " |\n";
     } else {
       out << std::setw(8) << stats->total << " total  " << std::setw(6) << std::showpos << delta
@@ -110,7 +161,7 @@ void render_latency_map(std::ostream& out,
   for (std::size_t i = 0; i < std::min(limit, rows.size()); ++i) {
     const auto& row = rows[i];
     if (format == OutputFormat::markdown) {
-      out << "| " << compact(row.name) << " | " << row.values.count << " | " << row.values.p50
+      out << "| " << markdown_cell(row.name) << " | " << row.values.count << " | " << row.values.p50
           << " | " << row.values.p95 << " | " << row.values.p99 << " | " << row.values.max << " |\n";
     } else {
       out << std::setw(8) << row.values.count << "  p50=" << std::setw(8) << row.values.p50
@@ -122,18 +173,147 @@ void render_latency_map(std::ostream& out,
   out << "\n";
 }
 
+void render_analysis_json(std::ostream& out, const AnalysisResult& result,
+                          std::size_t limit) {
+  out << "{\n"
+      << "  \"input_format\": \"" << json_escape(result.detected_format) << "\",\n"
+      << "  \"container_format\": \"" << json_escape(result.container_format) << "\",\n"
+      << "  \"outcome\": \"" << json_escape(result.outcome) << "\",\n"
+      << "  \"outcome_evidence\": \"" << json_escape(result.outcome_evidence) << "\",\n"
+      << "  \"physical_lines\": " << result.lines << ",\n"
+      << "  \"logical_events\": " << result.events << ",\n"
+      << "  \"matching_events\": " << result.matched << ",\n"
+      << "  \"continuation_lines\": " << result.continuations << ",\n"
+      << "  \"malformed_records\": " << result.malformed << ",\n"
+      << "  \"signals\": {\n"
+      << "    \"failures\": " << result.error_events << ",\n"
+      << "    \"warnings\": " << result.warnings << ",\n"
+      << "    \"exceptions\": " << result.exception_events << ",\n"
+      << "    \"advisories\": " << result.advisory_events << ",\n"
+      << "    \"retries\": " << result.retries << "\n"
+      << "  },\n"
+      << "  \"execution\": {\n"
+      << "    \"completed_jobs\": " << result.completed_jobs << ",\n"
+      << "    \"completed_stages\": " << result.completed_stages << ",\n"
+      << "    \"completed_tasks\": " << result.completed_tasks << ",\n"
+      << "    \"failed_jobs\": " << result.failed_jobs << ",\n"
+      << "    \"failed_stages\": " << result.failed_stages << ",\n"
+      << "    \"failed_tasks\": " << result.failed_tasks << "\n"
+      << "  },\n"
+      << "  \"errors\": [";
+  const auto errors = sorted_errors(result);
+  for (std::size_t index = 0; index < std::min(limit, errors.size()); ++index) {
+    const auto& [name, stats] = errors[index];
+    if (index != 0) out << ',';
+    out << "\n    {\"fingerprint\": \"" << json_escape(name)
+        << "\", \"total\": " << stats->total << ", \"previous\": "
+        << stats->previous << ", \"recent\": " << stats->recent << '}';
+  }
+  if (!errors.empty()) out << '\n';
+  out << "  ]\n}\n";
+}
+
+void render_error_json(std::ostream& out, const AnalysisResult& result,
+                       std::size_t limit) {
+  const auto rows = sorted_errors(result);
+  out << "[";
+  for (std::size_t index = 0; index < std::min(limit, rows.size()); ++index) {
+    const auto& [name, stats] = rows[index];
+    if (index != 0) out << ',';
+    out << "\n  {\"fingerprint\": \"" << json_escape(name)
+        << "\", \"total\": " << stats->total << ", \"previous\": "
+        << stats->previous << ", \"recent\": " << stats->recent << '}';
+  }
+  if (!rows.empty()) out << '\n';
+  out << "]\n";
+}
+
+void render_latency_json(
+    std::ostream& out,
+    const std::unordered_map<std::string, std::vector<double>>& groups,
+    std::size_t limit) {
+  struct Row {
+    std::string name;
+    Percentiles values;
+  };
+  std::vector<Row> rows;
+  rows.reserve(groups.size());
+  for (const auto& [name, values] : groups)
+    rows.push_back({name, calculate_percentiles(values)});
+  std::sort(rows.begin(), rows.end(), [](const Row& left, const Row& right) {
+    return left.values.p99 != right.values.p99
+               ? left.values.p99 > right.values.p99
+               : left.name < right.name;
+  });
+
+  out << std::fixed << std::setprecision(3) << "[";
+  for (std::size_t index = 0; index < std::min(limit, rows.size()); ++index) {
+    const auto& row = rows[index];
+    if (index != 0) out << ',';
+    out << "\n  {\"group\": \"" << json_escape(row.name)
+        << "\", \"samples\": " << row.values.count
+        << ", \"p50_ms\": " << row.values.p50
+        << ", \"p95_ms\": " << row.values.p95
+        << ", \"p99_ms\": " << row.values.p99
+        << ", \"max_ms\": " << row.values.max << '}';
+  }
+  if (!rows.empty()) out << '\n';
+  out << "]\n";
+}
+
 }  // namespace
 
 void render_analysis(std::ostream& out, const AnalysisResult& result, const RenderOptions& options) {
-  if (options.format == OutputFormat::json) return;
+  if (options.format == OutputFormat::json) {
+    render_analysis_json(out, result, options.limit);
+    return;
+  }
   heading(out, options.format, "Incident summary");
   if (options.format == OutputFormat::markdown) {
-    out << "- Parsed lines: " << result.lines << '\n'
+    out << "- Input format: `" << result.detected_format << "` in `"
+        << result.container_format << "`\n"
+        << "- Outcome: **" << result.outcome << "**\n"
+        << "- Evidence: " << result.outcome_evidence << '\n'
+        << "- Physical lines: " << result.lines << '\n'
+        << "- Logical events: " << result.events << '\n'
         << "- Matching events: " << result.matched << '\n'
-        << "- Malformed lines skipped: " << result.malformed << "\n\n";
+        << "- Continuation lines: " << result.continuations << '\n'
+        << "- Malformed records skipped: " << result.malformed << "\n\n";
   } else {
-    out << "Parsed " << result.lines << " lines; " << result.matched << " matched; "
-        << result.malformed << " malformed.\n\n";
+    out << "Format: " << result.detected_format << " (" << result.container_format
+        << ")\nOutcome: " << result.outcome << "\nEvidence: "
+        << result.outcome_evidence << "\nParsed " << result.lines
+        << " physical lines into " << result.events << " logical events; "
+        << result.matched << " matched; " << result.continuations
+        << " continuation lines; " << result.malformed << " malformed.\n\n";
+  }
+  heading(out, options.format, "Signals");
+  if (options.format == OutputFormat::markdown) {
+    out << "| Failures | Warnings | Exceptions | Advisories | Retries |\n"
+           "|---:|---:|---:|---:|---:|\n"
+        << "| " << result.error_events << " | " << result.warnings << " | "
+        << result.exception_events << " | " << result.advisory_events << " | "
+        << result.retries << " |\n\n";
+  } else {
+    out << "Failures: " << result.error_events << "; warnings: " << result.warnings
+        << "; exceptions: " << result.exception_events
+        << "; advisories: " << result.advisory_events
+        << "; retries: " << result.retries << ".\n\n";
+  }
+  if (result.completed_jobs || result.completed_stages || result.completed_tasks ||
+      result.failed_jobs || result.failed_stages || result.failed_tasks) {
+    heading(out, options.format, "Execution lifecycle");
+    if (options.format == OutputFormat::markdown) {
+      out << "| Entity | Completed | Failed |\n|---|---:|---:|\n"
+          << "| Jobs | " << result.completed_jobs << " | " << result.failed_jobs << " |\n"
+          << "| Stages | " << result.completed_stages << " | " << result.failed_stages << " |\n"
+          << "| Tasks | " << result.completed_tasks << " | " << result.failed_tasks << " |\n\n";
+    } else {
+      out << "Jobs: " << result.completed_jobs << " completed, " << result.failed_jobs
+          << " failed\nStages: " << result.completed_stages << " completed, "
+          << result.failed_stages << " failed\nTasks: " << result.completed_tasks
+          << " completed, " << result.failed_tasks << " failed\n\n";
+    }
   }
   heading(out, options.format, "Errors increasing in the recent half");
   render_error_rows(out, sorted_errors(result), options.format, options.limit);
@@ -146,7 +326,10 @@ void render_analysis(std::ostream& out, const AnalysisResult& result, const Rend
 }
 
 void render_errors(std::ostream& out, const AnalysisResult& result, const RenderOptions& options) {
-  if (options.format == OutputFormat::json) return;
+  if (options.format == OutputFormat::json) {
+    render_error_json(out, result, options.limit);
+    return;
+  }
   heading(out, options.format, "Error groups");
   if (options.group_by == "service") {
     std::unordered_map<std::string, std::uint64_t> counts;
@@ -166,8 +349,13 @@ void render_errors(std::ostream& out, const AnalysisResult& result, const Render
 }
 
 void render_latency(std::ostream& out, const AnalysisResult& result, const RenderOptions& options) {
-  if (options.format == OutputFormat::json) return;
   const bool by_service = options.group_by == "service";
+  if (options.format == OutputFormat::json) {
+    render_latency_json(out, by_service ? result.service_latencies
+                                       : result.endpoint_latencies,
+                        options.limit);
+    return;
+  }
   heading(out, options.format, by_service ? "Service latency" : "Endpoint latency");
   render_latency_map(out, by_service ? result.service_latencies : result.endpoint_latencies,
                      options.format, by_service ? "Service" : "Endpoint", options.limit);
