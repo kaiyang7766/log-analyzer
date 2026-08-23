@@ -130,6 +130,52 @@ int main() {
              "succeeded",
          "filters should not hide the source-wide Spark success");
 
+  AnalyzeOptions flink_options;
+  flink_options.retain_records = true;
+  flink_options.default_timezone = "+08:00";
+  const auto flink_result =
+      analyze_file(fixture("flink_jobmanager.out"), flink_options);
+  expect(flink_result.detected_format == "flink-console",
+         "Flink console logs should be auto-detected");
+  expect(flink_result.events == 4, "Flink records should be framed");
+  expect(flink_result.continuations == 2,
+         "Flink stack traces should be attached");
+  expect(flink_result.malformed == 1,
+         "unstructured launcher preamble should be counted");
+  expect(flink_result.records.front().timestamp ==
+             "2026-08-14T16:51:05+08:00",
+         "Flink timestamps should be normalized");
+  expect(flink_result.first_timestamp == "2026-08-14T16:51:05+08:00" &&
+             flink_result.last_timestamp == "2026-08-14T16:51:08+08:00",
+         "Flink analysis should report its time range");
+  expect(flink_result.records.front().service == "flink",
+         "Flink records should identify their service");
+  expect(flink_result.warnings == 1, "Flink warnings should be counted");
+  expect(flink_result.exception_events == 1,
+         "Flink multiline exceptions should be recognized");
+  expect(flink_result.exception_groups.size() == 1,
+         "Flink exception root causes should be grouped");
+  expect(flink_result.retries == 1,
+         "Flink failover attempts should contribute retry counts");
+  expect(flink_result.retry_operations.at("getFileInfo") == 2,
+         "Flink summaries should retain maximum attempts by operation");
+  expect(flink_result.completed_jobs == 1,
+         "Flink FINISHED states should complete jobs");
+  expect(flink_result.failed_jobs == 1,
+         "Flink FAILED states should fail jobs");
+  expect(flink_result.outcome == "failed",
+         "a terminal Flink failure should determine the outcome");
+  std::ostringstream flink_text;
+  render_analysis(flink_text, flink_result, RenderOptions{});
+  expect(flink_text.str().find("Exception root causes") != std::string::npos,
+         "Flink summaries should include exception root causes");
+  expect(flink_text.str().find("Flink components") != std::string::npos,
+         "Flink summaries should include logger activity");
+  expect(flink_text.str().find("Retry operations") != std::string::npos,
+         "Flink summaries should include retry operations");
+  expect(flink_text.str().find("Endpoint latency") == std::string::npos,
+         "Flink summaries should omit empty endpoint latency");
+
   std::ostringstream json;
   RenderOptions render;
   render.format = OutputFormat::json;
