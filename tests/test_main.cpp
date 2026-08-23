@@ -95,6 +95,8 @@ int main() {
   spark_options.retain_records = true;
   spark_options.default_timezone = "+00:00";
   const auto spark_result = analyze_file(fixture("spark_syslog.html"), spark_options);
+  expect(spark_result.source_file == "spark_syslog.html",
+         "analysis should retain the scanned file name");
   expect(spark_result.detected_format == "spark-syslog",
          "Spark syslog should be auto-detected inside HTML");
   expect(spark_result.container_format == "html-xmp",
@@ -132,6 +134,8 @@ int main() {
   RenderOptions render;
   render.format = OutputFormat::json;
   render_analysis(json, spark_result, render);
+  expect(json.str().find("\"file\": \"spark_syslog.html\"") != std::string::npos,
+         "JSON output should contain the scanned file name");
   expect(json.str().find("\"outcome\": \"succeeded\"") != std::string::npos,
          "JSON output should contain the resolved outcome");
 

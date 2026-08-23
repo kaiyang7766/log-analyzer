@@ -226,6 +226,7 @@ AnalysisResult analyze_file(const std::filesystem::path& path,
   detail::InputBuffer input(path, options.io_mode);
 
   AnalysisResult result;
+  result.source_file = path.filename().string();
   result.bytes = input.size();
   if (input.size() == 0) return result;
 

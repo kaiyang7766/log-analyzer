@@ -76,6 +76,7 @@ struct ErrorStats {
 };
 
 struct AnalysisResult {
+  std::string source_file;
   std::uint64_t lines = 0;
   std::uint64_t events = 0;
   std::uint64_t continuations = 0;

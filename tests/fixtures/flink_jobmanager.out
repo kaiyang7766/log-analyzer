@@ -1,0 +1,7 @@
+Start command: java org.apache.flink.kubernetes.entrypoint.KubernetesApplicationClusterEntrypoint
+26/08/14 16:51:05 INFO Dispatcher: Job a1b2c3 switched from state CREATED to RUNNING.
+26/08/14 16:51:06 WARN RetryInvocationHandler: Exception while invoking class example.storage.Client.getFileInfo over storage.local. Not retrying because failovers (2) exceeded maximum allowed (2)
+java.io.IOException: storage unavailable
+    at example.storage.Client.connect(Client.java:42)
+26/08/14 16:51:07 INFO ExecutionGraph: Job a1b2c3 reached globally terminal state FINISHED.
+26/08/14 16:51:08 ERROR ExecutionGraph: Job d4e5f6 switched from state FAILING to FAILED.

@@ -176,6 +176,7 @@ void render_latency_map(std::ostream& out,
 void render_analysis_json(std::ostream& out, const AnalysisResult& result,
                           std::size_t limit) {
   out << "{\n"
+      << "  \"file\": \"" << json_escape(result.source_file) << "\",\n"
       << "  \"input_format\": \"" << json_escape(result.detected_format) << "\",\n"
       << "  \"container_format\": \"" << json_escape(result.container_format) << "\",\n"
       << "  \"outcome\": \"" << json_escape(result.outcome) << "\",\n"
@@ -270,7 +271,8 @@ void render_analysis(std::ostream& out, const AnalysisResult& result, const Rend
   }
   heading(out, options.format, "Incident summary");
   if (options.format == OutputFormat::markdown) {
-    out << "- Input format: `" << result.detected_format << "` in `"
+    out << "- File: `" << result.source_file << "`\n"
+        << "- Input format: `" << result.detected_format << "` in `"
         << result.container_format << "`\n"
         << "- Outcome: **" << result.outcome << "**\n"
         << "- Evidence: " << result.outcome_evidence << '\n'
@@ -280,7 +282,8 @@ void render_analysis(std::ostream& out, const AnalysisResult& result, const Rend
         << "- Continuation lines: " << result.continuations << '\n'
         << "- Malformed records skipped: " << result.malformed << "\n\n";
   } else {
-    out << "Format: " << result.detected_format << " (" << result.container_format
+    out << "File: " << result.source_file
+        << "\nFormat: " << result.detected_format << " (" << result.container_format
         << ")\nOutcome: " << result.outcome << "\nEvidence: "
         << result.outcome_evidence << "\nParsed " << result.lines
         << " physical lines into " << result.events << " logical events; "
