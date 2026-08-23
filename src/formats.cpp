@@ -184,6 +184,15 @@ std::string normalize_app_timestamp(std::string_view date, std::string_view time
   return std::string(date) + "T" + std::string(time);
 }
 
+std::string normalize_full_year_timestamp(std::string_view value,
+                                          std::string_view default_timezone) {
+  if (value.size() < 19) return std::string(value);
+  std::string result(value);
+  result[10] = 'T';
+  result.append(default_timezone);
+  return result;
+}
+
 std::string normalize_short_year_timestamp(std::string_view value,
                                            std::string_view default_timezone) {
   if (value.size() < 17) return std::string(value);
@@ -201,7 +210,14 @@ std::string normalize_short_year_timestamp(std::string_view value,
 
 ContainerView unwrap_container(std::string_view input) {
   const auto xmp = input.find("<xmp");
-  if (xmp == std::string_view::npos) return {input, 0, "plain-text"};
+  if (xmp == std::string_view::npos) {
+    const auto content_start = input.find_first_not_of('\0');
+    if (content_start == std::string_view::npos)
+      return {{}, input.size(), "nul-padded-text"};
+    if (content_start > 0)
+      return {input.substr(content_start), content_start, "nul-padded-text"};
+    return {input, 0, "plain-text"};
+  }
   const auto start_tag_end = input.find('>', xmp);
   const auto end = input.find("</xmp>", start_tag_end);
   if (start_tag_end == std::string_view::npos || end == std::string_view::npos ||
@@ -260,6 +276,40 @@ bool parse_spark_header(std::string_view line, std::string_view default_timezone
 
 bool parse_flink_header(std::string_view line, std::string_view default_timezone,
                         LogRecord* record) {
+  while (!line.empty() && (line.front() == ' ' || line.front() == '\t'))
+    line.remove_prefix(1);
+
+  if (line.size() >= 25 && line[4] == '-' && line[7] == '-' &&
+      line[10] == ' ' && line[13] == ':' && line[16] == ':' &&
+      (line[19] == ',' || line[19] == '.')) {
+    const auto timestamp = line.substr(0, 23);
+    const auto remainder = line.substr(24);
+    std::size_t cursor = 0;
+    const auto level = take_token(remainder, cursor);
+    if (!is_level(level)) return false;
+
+    const auto message_separator = remainder.find("[] - ", cursor);
+    if (message_separator == std::string_view::npos) return false;
+    auto context = trim_view(
+        remainder.substr(cursor, message_separator - cursor));
+    std::size_t context_cursor = 0;
+    const auto logger = take_token(context, context_cursor);
+    if (logger.empty()) return false;
+    const auto thread = trim_view(context.substr(context_cursor));
+    if (!record) return true;
+
+    record->timestamp =
+        normalize_full_year_timestamp(timestamp, default_timezone);
+    record->severity = std::string(level);
+    record->logger = std::string(logger);
+    record->source = record->logger;
+    record->thread = std::string(thread);
+    record->service = "flink";
+    record->message =
+        std::string(trim_view(remainder.substr(message_separator + 5)));
+    return true;
+  }
+
   if (line.size() < 24 || line[2] != '/' || line[5] != '/' || line[8] != ' ' ||
       line[11] != ':' || line[14] != ':' || line[17] != ' ')
     return false;

@@ -176,6 +176,39 @@ int main() {
   expect(flink_text.str().find("Endpoint latency") == std::string::npos,
          "Flink summaries should omit empty endpoint latency");
 
+  const auto padded_flink_path =
+      std::filesystem::temp_directory_path() / "logscope-padded-jobmanager.log";
+  {
+    std::ofstream file(padded_flink_path, std::ios::binary);
+    file.write("\0\0\0\0", 4);
+    file << "2026-07-21 02:51:41,101 INFO  com.example.Service"
+            "     worker-1     [] - Started service\n";
+    file << " 2026-07-21 02:51:42,202 WARN  org.apache.flink.runtime.Worker"
+            "     jobmanager-future-thread-1     [] - Delayed checkpoint\n";
+  }
+  AnalyzeOptions padded_flink_options;
+  padded_flink_options.retain_records = true;
+  padded_flink_options.default_timezone = "+00:00";
+  const auto padded_flink_result =
+      analyze_file(padded_flink_path, padded_flink_options);
+  expect(padded_flink_result.detected_format == "flink-console",
+         "column-aligned Flink logs should be auto-detected");
+  expect(padded_flink_result.container_format == "nul-padded-text",
+         "leading NUL padding should be reported as a container");
+  expect(padded_flink_result.events == 2 && padded_flink_result.malformed == 0,
+         "NUL-padded Flink records should parse without malformed input");
+  expect(padded_flink_result.records.front().offset == 4,
+         "record offsets should include stripped NUL padding");
+  expect(padded_flink_result.records.front().timestamp ==
+             "2026-07-21T02:51:41,101+00:00",
+         "full-year Flink timestamps should be normalized");
+  expect(padded_flink_result.records.front().logger == "com.example.Service" &&
+             padded_flink_result.records.front().thread == "worker-1",
+         "column-aligned Flink logger and thread fields should parse");
+  expect(padded_flink_result.warnings == 1,
+         "column-aligned Flink warning levels should be counted");
+  std::filesystem::remove(padded_flink_path);
+
   std::ostringstream json;
   RenderOptions render;
   render.format = OutputFormat::json;
