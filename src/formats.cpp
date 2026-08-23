@@ -373,10 +373,10 @@ InputFormat detect_format(std::string_view content, InputFormat requested) {
       "could not detect input format; use --input-format to select one explicitly");
 }
 
-template <typename Predicate>
-std::vector<EventSpan> frame_events(std::string_view content, std::size_t base_offset,
-                                    Predicate is_start, DecodedInput& decoded) {
-  std::vector<EventSpan> events;
+template <typename Predicate, typename Consumer>
+void for_each_event(std::string_view content, std::size_t base_offset,
+                    Predicate is_start, Consumer consume,
+                    DecodedInput& decoded) {
   std::size_t cursor = 0;
   std::size_t event_start = std::string_view::npos;
   std::size_t header_end = 0;
@@ -388,9 +388,10 @@ std::vector<EventSpan> frame_events(std::string_view content, std::size_t base_o
     auto continuation_start = header_end;
     if (continuation_start < event_end && content[continuation_start] == '\n')
       ++continuation_start;
-    events.push_back(
-        {base_offset + event_start, header,
-         content.substr(continuation_start, event_end - continuation_start)});
+    ++decoded.logical_events;
+    consume(EventSpan{base_offset + event_start, header,
+                      content.substr(continuation_start,
+                                     event_end - continuation_start)});
   };
 
   while (cursor < content.size()) {
@@ -416,8 +417,6 @@ std::vector<EventSpan> frame_events(std::string_view content, std::size_t base_o
     }
   }
   flush(content.size());
-  decoded.logical_events = events.size();
-  return events;
 }
 
 std::string string_field(const simdjson::dom::object& object, std::string_view key) {
@@ -459,7 +458,8 @@ bool message_looks_failed(std::string_view value) {
 }
 
 void decode_jsonl(std::string_view content, std::size_t base_offset,
-                  const AnalyzeOptions& options, DecodedInput& decoded) {
+                  const AnalyzeOptions& options, DecodedInput& decoded,
+                  const RecordConsumer& consume) {
   simdjson::dom::parser parser;
   std::size_t cursor = 0;
   while (cursor < content.size()) {
@@ -493,7 +493,7 @@ void decode_jsonl(std::string_view content, std::size_t base_offset,
         record.failure = level == "error" || level == "fatal" || level == "critical" ||
                          !record.stack_trace.empty() || message_looks_failed(record.message);
         record.event_kind = record.failure ? "failure" : "log";
-        decoded.records.push_back(std::move(record));
+        consume(std::move(record));
       }
     }
     cursor = end == std::string_view::npos ? content.size() : end + 1;
@@ -779,78 +779,92 @@ void enrich_flink_record(LogRecord& record) {
 }
 
 DecodedInput decode_framed(std::string_view content, std::size_t base_offset,
-                           InputFormat format, const AnalyzeOptions& options) {
+                           InputFormat format, const AnalyzeOptions& options,
+                           const RecordConsumer& consume) {
   DecodedInput decoded;
   decoded.format = format;
   decoded.format_name = std::string(input_format_name(format));
+  std::string first_timestamp;
+  std::string last_timestamp;
+  std::size_t emitted_records = 0;
+  const RecordConsumer emit = [&](LogRecord&& record) {
+    if (emitted_records == 0) first_timestamp = record.timestamp;
+    last_timestamp = record.timestamp;
+    ++emitted_records;
+    consume(std::move(record));
+  };
 
   if (format == InputFormat::jsonl) {
-    decode_jsonl(content, base_offset, options, decoded);
+    decode_jsonl(content, base_offset, options, decoded, emit);
   } else if (format == InputFormat::app_export || format == InputFormat::logback) {
-    const auto spans = frame_events(
+    for_each_event(
         content, base_offset,
-        [](std::string_view line) { return looks_like_app_header(line); }, decoded);
-    decoded.records.reserve(spans.size());
-    for (const auto& span : spans) {
-      LogRecord record;
-      if (decode_application_event(span, format, record))
-        decoded.records.push_back(std::move(record));
-      else
-        ++decoded.malformed;
-    }
+        [](std::string_view line) { return looks_like_app_header(line); },
+        [&](const EventSpan& span) {
+          LogRecord record;
+          if (decode_application_event(span, format, record))
+            emit(std::move(record));
+          else
+            ++decoded.malformed;
+        },
+        decoded);
   } else if (format == InputFormat::spark_syslog) {
-    const auto spans = frame_events(
+    std::string application_id;
+    for_each_event(
         content, base_offset,
         [&](std::string_view line) {
           return parse_spark_header(line, options.default_timezone, nullptr);
         },
+        [&](const EventSpan& span) {
+          LogRecord record;
+          record.offset = span.offset;
+          if (!parse_spark_header(span.header, options.default_timezone,
+                                  &record)) {
+            ++decoded.malformed;
+            return;
+          }
+          record.stack_trace = continuation_text(span.continuation);
+          record.exception = has_exception_line(record.stack_trace);
+          auto found_application =
+              extract_identifier(record.message, "application_");
+          if (found_application.empty())
+            found_application =
+                extract_identifier(record.stack_trace, "application_");
+          if (!found_application.empty())
+            application_id = std::move(found_application);
+          record.trace_id = application_id;
+          if (!application_id.empty())
+            record.attributes["application_id"] = application_id;
+          enrich_spark_record(record);
+          emit(std::move(record));
+        },
         decoded);
-    decoded.records.reserve(spans.size());
-    std::string application_id;
-    for (const auto& span : spans) {
-      LogRecord record;
-      record.offset = span.offset;
-      if (!parse_spark_header(span.header, options.default_timezone, &record)) {
-        ++decoded.malformed;
-        continue;
-      }
-      record.stack_trace = continuation_text(span.continuation);
-      record.exception = has_exception_line(record.stack_trace);
-      auto found_application = extract_identifier(record.message, "application_");
-      if (found_application.empty())
-        found_application = extract_identifier(record.stack_trace, "application_");
-      if (!found_application.empty()) application_id = std::move(found_application);
-      record.trace_id = application_id;
-      if (!application_id.empty()) record.attributes["application_id"] = application_id;
-      enrich_spark_record(record);
-      decoded.records.push_back(std::move(record));
-    }
   } else if (format == InputFormat::flink_console) {
-    const auto spans = frame_events(
+    for_each_event(
         content, base_offset,
         [&](std::string_view line) {
           return parse_flink_header(line, options.default_timezone, nullptr);
         },
+        [&](const EventSpan& span) {
+          LogRecord record;
+          record.offset = span.offset;
+          if (!parse_flink_header(span.header, options.default_timezone,
+                                  &record)) {
+            ++decoded.malformed;
+            return;
+          }
+          record.stack_trace = continuation_text(span.continuation);
+          record.exception =
+              has_exception_line(record.stack_trace) ||
+              contains_case_insensitive(record.message, "exception");
+          enrich_flink_record(record);
+          emit(std::move(record));
+        },
         decoded);
-    decoded.records.reserve(spans.size());
-    for (const auto& span : spans) {
-      LogRecord record;
-      record.offset = span.offset;
-      if (!parse_flink_header(span.header, options.default_timezone, &record)) {
-        ++decoded.malformed;
-        continue;
-      }
-      record.stack_trace = continuation_text(span.continuation);
-      record.exception = has_exception_line(record.stack_trace) ||
-                         contains_case_insensitive(record.message, "exception");
-      enrich_flink_record(record);
-      decoded.records.push_back(std::move(record));
-    }
   }
 
-  if (decoded.records.size() >= 2)
-    decoded.reverse_order =
-        decoded.records.front().timestamp > decoded.records.back().timestamp;
+  decoded.reverse_order = emitted_records >= 2 &&
+                          first_timestamp > last_timestamp;
   return decoded;
 }
 
@@ -874,11 +888,12 @@ std::string_view input_format_name(InputFormat format) {
   return "unknown";
 }
 
-DecodedInput decode_input(std::string_view input, const AnalyzeOptions& options) {
+DecodedInput decode_input(std::string_view input, const AnalyzeOptions& options,
+                          const RecordConsumer& consume) {
   const auto container = unwrap_container(input);
   const auto format = detect_format(container.content, options.input_format);
-  auto decoded =
-      decode_framed(container.content, container.base_offset, format, options);
+  auto decoded = decode_framed(container.content, container.base_offset, format,
+                               options, consume);
   decoded.container_name = container.name;
   return decoded;
 }
