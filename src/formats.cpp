@@ -184,9 +184,9 @@ std::string normalize_app_timestamp(std::string_view date, std::string_view time
   return std::string(date) + "T" + std::string(time);
 }
 
-std::string normalize_spark_timestamp(std::string_view value,
-                                      std::string_view default_timezone) {
-  if (value.size() < 21) return std::string(value);
+std::string normalize_short_year_timestamp(std::string_view value,
+                                           std::string_view default_timezone) {
+  if (value.size() < 17) return std::string(value);
   std::string result = "20";
   result.append(value.substr(0, 2));
   result.push_back('-');
@@ -247,13 +247,42 @@ bool parse_spark_header(std::string_view line, std::string_view default_timezone
   if (colon == std::string_view::npos) return false;
   if (!record) return true;
 
-  record->timestamp = normalize_spark_timestamp(timestamp, default_timezone);
+  record->timestamp = normalize_short_year_timestamp(timestamp, default_timezone);
   record->thread = std::string(trim_view(remainder.substr(0, level_position)));
   record->severity = std::string(level);
   record->logger =
       std::string(trim_view(remainder.substr(logger_start, colon - logger_start)));
   record->source = record->logger;
   record->service = "spark";
+  record->message = std::string(trim_view(remainder.substr(colon + 1)));
+  return true;
+}
+
+bool parse_flink_header(std::string_view line, std::string_view default_timezone,
+                        LogRecord* record) {
+  if (line.size() < 24 || line[2] != '/' || line[5] != '/' || line[8] != ' ' ||
+      line[11] != ':' || line[14] != ':' || line[17] != ' ')
+    return false;
+
+  const auto timestamp = line.substr(0, 17);
+  const auto remainder = line.substr(18);
+  std::size_t cursor = 0;
+  const auto level = take_token(remainder, cursor);
+  if (!is_level(level)) return false;
+
+  while (cursor < remainder.size() &&
+         std::isspace(static_cast<unsigned char>(remainder[cursor])))
+    ++cursor;
+  const auto colon = remainder.find(':', cursor);
+  if (colon == std::string_view::npos || colon == cursor) return false;
+  if (!record) return true;
+
+  record->timestamp =
+      normalize_short_year_timestamp(timestamp, default_timezone);
+  record->severity = std::string(level);
+  record->logger = std::string(trim_view(remainder.substr(cursor, colon - cursor)));
+  record->source = record->logger;
+  record->service = "flink";
   record->message = std::string(trim_view(remainder.substr(colon + 1)));
   return true;
 }
@@ -265,6 +294,7 @@ InputFormat detect_format(std::string_view content, InputFormat requested) {
   std::size_t app_headers = 0;
   std::size_t export_headers = 0;
   std::size_t spark_headers = 0;
+  std::size_t flink_headers = 0;
   std::size_t examined = 0;
   while (cursor < content.size() && examined < 200) {
     const auto end = content.find('\n', cursor);
@@ -278,6 +308,7 @@ InputFormat detect_format(std::string_view content, InputFormat requested) {
         if (line.find("_msg=") != std::string_view::npos) ++export_headers;
       }
       if (parse_spark_header(line, {}, nullptr)) ++spark_headers;
+      if (parse_flink_header(line, {}, nullptr)) ++flink_headers;
       if (examined == 1 && trim_view(line).starts_with('{')) return InputFormat::jsonl;
     }
     if (end == std::string_view::npos) break;
@@ -285,6 +316,7 @@ InputFormat detect_format(std::string_view content, InputFormat requested) {
   }
 
   if (spark_headers >= 2 && spark_headers >= app_headers) return InputFormat::spark_syslog;
+  if (flink_headers >= 2 && flink_headers >= app_headers) return InputFormat::flink_console;
   if (export_headers >= 1) return InputFormat::app_export;
   if (app_headers >= 1) return InputFormat::logback;
   throw std::runtime_error(
@@ -618,6 +650,84 @@ void enrich_spark_record(LogRecord& record) {
   if (latency >= 0.0 && std::isfinite(latency)) record.latency_ms = latency;
 }
 
+std::string flink_job_state(std::string_view message) {
+  std::string state;
+  if (const auto marker = message.find("globally terminal state ");
+      marker != std::string_view::npos) {
+    state = token_after(message.substr(marker), "globally terminal state ");
+  } else if (const auto marker = message.find("switched from state ");
+             marker != std::string_view::npos) {
+    const auto destination = message.find(" to ", marker);
+    if (destination != std::string_view::npos)
+      state = token_after(message.substr(destination), " to ");
+  }
+  while (!state.empty() &&
+         (state.back() == '.' || state.back() == ',' || state.back() == ';' ||
+          state.back() == ':'))
+    state.pop_back();
+  return state;
+}
+
+std::string flink_retry_operation(std::string_view message) {
+  const auto marker = message.find("invoking ");
+  if (marker == std::string_view::npos) return {};
+  auto operation = token_after(message.substr(marker), "invoking ");
+  if (operation != "class") return operation;
+
+  const auto qualified_start = marker + std::string_view("invoking class ").size();
+  const auto qualified_end = message.find(" over ", qualified_start);
+  if (qualified_end == std::string_view::npos) return {};
+  const auto qualified =
+      message.substr(qualified_start, qualified_end - qualified_start);
+  const auto dot = qualified.rfind('.');
+  return std::string(dot == std::string_view::npos ? qualified
+                                                   : qualified.substr(dot + 1));
+}
+
+void enrich_flink_record(LogRecord& record) {
+  const auto message = std::string_view(record.message);
+  const auto level = lower(record.severity);
+  record.failure = level == "error" || level == "fatal" || level == "critical";
+  record.event_kind = record.failure ? "failure" : "log";
+
+  if (message.find(" fail over attempts") != std::string_view::npos ||
+      message.find("failovers (") != std::string_view::npos) {
+    record.retry_round = unsigned_after(message, "after ");
+    if (record.retry_round == 0)
+      record.retry_round = unsigned_after(message, "failovers (");
+    if (record.retry_round > 0) {
+      record.event_kind = "retry_attempt";
+      const auto operation = flink_retry_operation(message);
+      if (!operation.empty()) record.attributes["operation"] = operation;
+    }
+  }
+  if (message.find("Not retrying because failovers") != std::string_view::npos &&
+      message.find("exceeded maximum allowed") != std::string_view::npos)
+    record.failure = true;
+
+  auto job_id = token_after(message, "Job ");
+  while (!job_id.empty() &&
+         (job_id.back() == '.' || job_id.back() == ',' || job_id.back() == ':' ||
+          job_id.back() == ')' || job_id.back() == ']'))
+    job_id.pop_back();
+  if (!job_id.empty()) record.attributes["job_id"] = std::move(job_id);
+
+  const auto state = flink_job_state(message);
+  if (!state.empty()) {
+    record.attributes["state"] = state;
+    if (state == "FINISHED") {
+      record.event_kind = "job_completed";
+      record.terminal_success = true;
+    } else if (state == "FAILED" || state == "CANCELED") {
+      record.event_kind = "job_failed";
+      record.failure = true;
+      record.terminal_failure = true;
+    }
+  } else if (record.failure && message.find("Job ") != std::string_view::npos) {
+    record.event_kind = "job_failed";
+  }
+}
+
 DecodedInput decode_framed(std::string_view content, std::size_t base_offset,
                            InputFormat format, const AnalyzeOptions& options) {
   DecodedInput decoded;
@@ -665,6 +775,27 @@ DecodedInput decode_framed(std::string_view content, std::size_t base_offset,
       enrich_spark_record(record);
       decoded.records.push_back(std::move(record));
     }
+  } else if (format == InputFormat::flink_console) {
+    const auto spans = frame_events(
+        content, base_offset,
+        [&](std::string_view line) {
+          return parse_flink_header(line, options.default_timezone, nullptr);
+        },
+        decoded);
+    decoded.records.reserve(spans.size());
+    for (const auto& span : spans) {
+      LogRecord record;
+      record.offset = span.offset;
+      if (!parse_flink_header(span.header, options.default_timezone, &record)) {
+        ++decoded.malformed;
+        continue;
+      }
+      record.stack_trace = continuation_text(span.continuation);
+      record.exception = has_exception_line(record.stack_trace) ||
+                         contains_case_insensitive(record.message, "exception");
+      enrich_flink_record(record);
+      decoded.records.push_back(std::move(record));
+    }
   }
 
   if (decoded.records.size() >= 2)
@@ -687,6 +818,8 @@ std::string_view input_format_name(InputFormat format) {
       return "logback";
     case InputFormat::spark_syslog:
       return "spark-syslog";
+    case InputFormat::flink_console:
+      return "flink-console";
   }
   return "unknown";
 }

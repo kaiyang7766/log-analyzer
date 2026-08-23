@@ -23,14 +23,14 @@ auto sorted_counts(const Map& counts) {
   return rows;
 }
 
-std::string compact(std::string value, std::size_t width = 96) {
+std::string compact(std::string value, std::size_t width = 140) {
   std::replace(value.begin(), value.end(), '\n', ' ');
   std::replace(value.begin(), value.end(), '\r', ' ');
   if (value.size() > width) value = value.substr(0, width - 3) + "...";
   return value;
 }
 
-std::string markdown_cell(std::string value, std::size_t width = 96) {
+std::string markdown_cell(std::string value, std::size_t width = 140) {
   value = compact(std::move(value), width);
   std::string escaped;
   escaped.reserve(value.size());
@@ -87,9 +87,10 @@ void heading(std::ostream& out, OutputFormat format, std::string_view title) {
 }
 
 void render_count_table(std::ostream& out, const auto& rows, OutputFormat format,
-                        std::string_view name, std::size_t limit) {
+                        std::string_view name, std::size_t limit,
+                        std::string_view value_name = "Count") {
   if (format == OutputFormat::markdown) {
-    out << "| " << name << " | Count |\n|---|---:|\n";
+    out << "| " << name << " | " << value_name << " |\n|---|---:|\n";
     for (std::size_t i = 0; i < std::min(limit, rows.size()); ++i)
       out << "| " << markdown_cell(rows[i].first) << " | " << rows[i].second << " |\n";
     out << '\n';
@@ -103,10 +104,11 @@ void render_count_table(std::ostream& out, const auto& rows, OutputFormat format
 
 using ErrorRow = std::pair<std::string, const ErrorStats*>;
 
-std::vector<ErrorRow> sorted_errors(const AnalysisResult& result) {
+std::vector<ErrorRow> sorted_error_groups(
+    const std::unordered_map<std::string, ErrorStats>& groups) {
   std::vector<ErrorRow> rows;
-  rows.reserve(result.errors.size());
-  for (const auto& [key, stats] : result.errors) rows.emplace_back(key, &stats);
+  rows.reserve(groups.size());
+  for (const auto& [key, stats] : groups) rows.emplace_back(key, &stats);
   std::sort(rows.begin(), rows.end(), [](const auto& left, const auto& right) {
     const auto left_delta = static_cast<std::int64_t>(left.second->recent) -
                             static_cast<std::int64_t>(left.second->previous);
@@ -119,9 +121,11 @@ std::vector<ErrorRow> sorted_errors(const AnalysisResult& result) {
 }
 
 void render_error_rows(std::ostream& out, const std::vector<ErrorRow>& rows,
-                       OutputFormat format, std::size_t limit) {
+                       OutputFormat format, std::size_t limit,
+                       std::string_view group_name) {
   if (format == OutputFormat::markdown) {
-    out << "| Normalized error | Previous half | Recent half | Change | Total |\n"
+    out << "| " << group_name
+        << " | Previous half | Recent half | Change | Total |\n"
            "|---|---:|---:|---:|---:|\n";
   }
   for (std::size_t i = 0; i < std::min(limit, rows.size()); ++i) {
@@ -137,7 +141,10 @@ void render_error_rows(std::ostream& out, const std::vector<ErrorRow>& rows,
       if (!stats->example.empty()) out << "          example: " << compact(stats->example) << '\n';
     }
   }
-  if (rows.empty()) out << (format == OutputFormat::markdown ? "| _No errors_ | 0 | 0 | 0 | 0 |\n" : "(none)\n");
+  if (rows.empty())
+    out << (format == OutputFormat::markdown
+                ? "| _None_ | 0 | 0 | 0 | 0 |\n"
+                : "(none)\n");
   out << '\n';
 }
 
@@ -176,8 +183,11 @@ void render_latency_map(std::ostream& out,
 void render_analysis_json(std::ostream& out, const AnalysisResult& result,
                           std::size_t limit) {
   out << "{\n"
+      << "  \"file\": \"" << json_escape(result.source_file) << "\",\n"
       << "  \"input_format\": \"" << json_escape(result.detected_format) << "\",\n"
       << "  \"container_format\": \"" << json_escape(result.container_format) << "\",\n"
+      << "  \"first_timestamp\": \"" << json_escape(result.first_timestamp) << "\",\n"
+      << "  \"last_timestamp\": \"" << json_escape(result.last_timestamp) << "\",\n"
       << "  \"outcome\": \"" << json_escape(result.outcome) << "\",\n"
       << "  \"outcome_evidence\": \"" << json_escape(result.outcome_evidence) << "\",\n"
       << "  \"physical_lines\": " << result.lines << ",\n"
@@ -201,7 +211,7 @@ void render_analysis_json(std::ostream& out, const AnalysisResult& result,
       << "    \"failed_tasks\": " << result.failed_tasks << "\n"
       << "  },\n"
       << "  \"errors\": [";
-  const auto errors = sorted_errors(result);
+  const auto errors = sorted_error_groups(result.errors);
   for (std::size_t index = 0; index < std::min(limit, errors.size()); ++index) {
     const auto& [name, stats] = errors[index];
     if (index != 0) out << ',';
@@ -210,12 +220,55 @@ void render_analysis_json(std::ostream& out, const AnalysisResult& result,
         << stats->previous << ", \"recent\": " << stats->recent << '}';
   }
   if (!errors.empty()) out << '\n';
+  out << "  ],\n"
+      << "  \"exception_groups\": [";
+  const auto exceptions = sorted_error_groups(result.exception_groups);
+  for (std::size_t index = 0;
+       index < std::min(limit, exceptions.size()); ++index) {
+    const auto& [name, stats] = exceptions[index];
+    if (index != 0) out << ',';
+    out << "\n    {\"fingerprint\": \"" << json_escape(name)
+        << "\", \"total\": " << stats->total << ", \"previous\": "
+        << stats->previous << ", \"recent\": " << stats->recent << '}';
+  }
+  if (!exceptions.empty()) out << '\n';
+  out << "  ],\n"
+      << "  \"warning_patterns\": [";
+  const auto warnings = sorted_counts(result.warning_patterns);
+  for (std::size_t index = 0; index < std::min(limit, warnings.size());
+       ++index) {
+    if (index != 0) out << ',';
+    out << "\n    {\"pattern\": \"" << json_escape(warnings[index].first)
+        << "\", \"count\": " << warnings[index].second << '}';
+  }
+  if (!warnings.empty()) out << '\n';
+  out << "  ],\n"
+      << "  \"retry_operations\": [";
+  const auto retry_operations = sorted_counts(result.retry_operations);
+  for (std::size_t index = 0;
+       index < std::min(limit, retry_operations.size()); ++index) {
+    if (index != 0) out << ',';
+    out << "\n    {\"operation\": \""
+        << json_escape(retry_operations[index].first)
+        << "\", \"max_attempt\": " << retry_operations[index].second << '}';
+  }
+  if (!retry_operations.empty()) out << '\n';
+  out << "  ],\n"
+      << "  \"loggers\": [";
+  const auto loggers = sorted_counts(result.loggers);
+  for (std::size_t index = 0; index < std::min(limit, loggers.size());
+       ++index) {
+    if (index != 0) out << ',';
+    out << "\n    {\"logger\": \"" << json_escape(loggers[index].first)
+        << "\", \"count\": " << loggers[index].second << '}';
+  }
+  if (!loggers.empty()) out << '\n';
   out << "  ]\n}\n";
 }
 
 void render_error_json(std::ostream& out, const AnalysisResult& result,
                        std::size_t limit) {
-  const auto rows = sorted_errors(result);
+  const auto rows = sorted_error_groups(result.errors);
   out << "[";
   for (std::size_t index = 0; index < std::min(limit, rows.size()); ++index) {
     const auto& [name, stats] = rows[index];
@@ -270,9 +323,13 @@ void render_analysis(std::ostream& out, const AnalysisResult& result, const Rend
   }
   heading(out, options.format, "Incident summary");
   if (options.format == OutputFormat::markdown) {
-    out << "- Input format: `" << result.detected_format << "` in `"
-        << result.container_format << "`\n"
-        << "- Outcome: **" << result.outcome << "**\n"
+    out << "- File: `" << result.source_file << "`\n"
+        << "- Input format: `" << result.detected_format << "` in `"
+        << result.container_format << "`\n";
+    if (!result.first_timestamp.empty())
+      out << "- Time range: `" << result.first_timestamp << "` to `"
+          << result.last_timestamp << "`\n";
+    out << "- Outcome: **" << result.outcome << "**\n"
         << "- Evidence: " << result.outcome_evidence << '\n'
         << "- Physical lines: " << result.lines << '\n'
         << "- Logical events: " << result.events << '\n'
@@ -280,8 +337,13 @@ void render_analysis(std::ostream& out, const AnalysisResult& result, const Rend
         << "- Continuation lines: " << result.continuations << '\n'
         << "- Malformed records skipped: " << result.malformed << "\n\n";
   } else {
-    out << "Format: " << result.detected_format << " (" << result.container_format
-        << ")\nOutcome: " << result.outcome << "\nEvidence: "
+    out << "File: " << result.source_file
+        << "\nFormat: " << result.detected_format << " (" << result.container_format
+        << ")\n";
+    if (!result.first_timestamp.empty())
+      out << "Time range: " << result.first_timestamp << " to "
+          << result.last_timestamp << '\n';
+    out << "Outcome: " << result.outcome << "\nEvidence: "
         << result.outcome_evidence << "\nParsed " << result.lines
         << " physical lines into " << result.events << " logical events; "
         << result.matched << " matched; " << result.continuations
@@ -315,14 +377,44 @@ void render_analysis(std::ostream& out, const AnalysisResult& result, const Rend
           << " completed, " << result.failed_tasks << " failed\n\n";
     }
   }
-  heading(out, options.format, "Errors increasing in the recent half");
-  render_error_rows(out, sorted_errors(result), options.format, options.limit);
-  heading(out, options.format, "Services involved");
-  render_count_table(out, sorted_counts(result.services), options.format, "Service", options.limit);
-  heading(out, options.format, "Endpoints involved");
-  render_count_table(out, sorted_counts(result.endpoints), options.format, "Endpoint", options.limit);
-  heading(out, options.format, "Endpoint latency");
-  render_latency_map(out, result.endpoint_latencies, options.format, "Endpoint", options.limit);
+  if (!result.errors.empty()) {
+    heading(out, options.format, "Errors increasing in the recent half");
+    render_error_rows(out, sorted_error_groups(result.errors), options.format,
+                      options.limit, "Normalized error");
+  }
+  if (!result.exception_groups.empty()) {
+    heading(out, options.format, "Exception root causes");
+    render_error_rows(out, sorted_error_groups(result.exception_groups),
+                      options.format, options.limit, "Root cause");
+  }
+  if (!result.warning_patterns.empty()) {
+    heading(out, options.format, "Warning patterns");
+    render_count_table(out, sorted_counts(result.warning_patterns),
+                       options.format, "Warning", options.limit);
+  }
+  if (!result.retry_operations.empty()) {
+    heading(out, options.format, "Retry operations");
+    render_count_table(out, sorted_counts(result.retry_operations),
+                       options.format, "Operation", options.limit,
+                       "Maximum attempt");
+  }
+  if (result.detected_format == "flink-console") {
+    heading(out, options.format, "Flink components");
+    render_count_table(out, sorted_counts(result.loggers), options.format,
+                       "Logger", options.limit);
+  } else {
+    heading(out, options.format, "Services involved");
+    render_count_table(out, sorted_counts(result.services), options.format,
+                       "Service", options.limit);
+    heading(out, options.format, "Endpoints involved");
+    render_count_table(out, sorted_counts(result.endpoints), options.format,
+                       "Endpoint", options.limit);
+  }
+  if (!result.endpoint_latencies.empty()) {
+    heading(out, options.format, "Endpoint latency");
+    render_latency_map(out, result.endpoint_latencies, options.format,
+                       "Endpoint", options.limit);
+  }
 }
 
 void render_errors(std::ostream& out, const AnalysisResult& result, const RenderOptions& options) {
@@ -344,7 +436,8 @@ void render_errors(std::ostream& out, const AnalysisResult& result, const Render
     }
     render_count_table(out, sorted_counts(counts), options.format, "Endpoint", options.limit);
   } else {
-    render_error_rows(out, sorted_errors(result), options.format, options.limit);
+    render_error_rows(out, sorted_error_groups(result.errors), options.format,
+                      options.limit, "Normalized error");
   }
 }
 

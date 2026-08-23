@@ -31,7 +31,14 @@ struct Filters {
 
 enum class IoMode { mmap, buffered };
 enum class OutputFormat { text, markdown, json };
-enum class InputFormat { auto_detect, jsonl, app_export, logback, spark_syslog };
+enum class InputFormat {
+  auto_detect,
+  jsonl,
+  app_export,
+  logback,
+  spark_syslog,
+  flink_console
+};
 
 struct AnalyzeOptions {
   FieldConfig fields;
@@ -76,6 +83,7 @@ struct ErrorStats {
 };
 
 struct AnalysisResult {
+  std::string source_file;
   std::uint64_t lines = 0;
   std::uint64_t events = 0;
   std::uint64_t continuations = 0;
@@ -96,6 +104,8 @@ struct AnalysisResult {
   double elapsed_seconds = 0.0;
   std::string detected_format;
   std::string container_format = "plain-text";
+  std::string first_timestamp;
+  std::string last_timestamp;
   std::string outcome = "unknown";
   std::string outcome_evidence;
   std::unordered_map<std::string, std::uint64_t> services;
@@ -103,7 +113,9 @@ struct AnalysisResult {
   std::unordered_map<std::string, std::uint64_t> loggers;
   std::unordered_map<std::string, std::uint64_t> states;
   std::unordered_map<std::string, std::uint64_t> warning_patterns;
+  std::unordered_map<std::string, std::uint64_t> retry_operations;
   std::unordered_map<std::string, ErrorStats> errors;
+  std::unordered_map<std::string, ErrorStats> exception_groups;
   std::unordered_map<std::string, std::vector<double>> endpoint_latencies;
   std::unordered_map<std::string, std::vector<double>> service_latencies;
   std::vector<LogRecord> records;

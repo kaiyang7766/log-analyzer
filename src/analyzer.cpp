@@ -36,12 +36,14 @@ struct Shard {
   bool saw_failure_evidence = false;
   std::string terminal_evidence;
   std::unordered_map<std::string, std::uint32_t> retry_rounds;
+  std::unordered_map<std::string, std::uint32_t> retry_operations;
   std::unordered_map<std::string, std::uint64_t> services;
   std::unordered_map<std::string, std::uint64_t> endpoints;
   std::unordered_map<std::string, std::uint64_t> loggers;
   std::unordered_map<std::string, std::uint64_t> states;
   std::unordered_map<std::string, std::uint64_t> warning_patterns;
   std::unordered_map<std::string, ErrorStats> errors;
+  std::unordered_map<std::string, ErrorStats> exception_groups;
   std::unordered_map<std::string, std::vector<double>> endpoint_latencies;
   std::unordered_map<std::string, std::vector<double>> service_latencies;
   std::vector<LogRecord> records;
@@ -107,11 +109,28 @@ void consume_record(Shard& shard, LogRecord record, const AnalyzeOptions& option
     ++shard.warning_patterns[normalize_error(record.message)];
   }
   if (record.failure) ++shard.error_events;
-  if (record.exception) ++shard.exception_events;
+  if (record.exception) {
+    ++shard.exception_events;
+    const auto normalized = normalize_error(record.message, record.stack_trace);
+    auto& stats = shard.exception_groups[normalized];
+    ++stats.total;
+    const bool in_later_half = record.offset >= input_size / 2;
+    const bool recent = reverse_order ? !in_later_half : in_later_half;
+    if (recent)
+      ++stats.recent;
+    else
+      ++stats.previous;
+    ++stats.services[service];
+    ++stats.endpoints[endpoint];
+    if (stats.example.empty()) stats.example = record.message;
+  }
   if (record.advisory) ++shard.advisory_events;
-  if (record.retry_round > 0 && record.event_kind == "workflow_attempt") {
+  if (record.retry_round > 0 &&
+      (record.event_kind == "workflow_attempt" ||
+       record.event_kind == "retry_attempt")) {
     std::string retry_key;
-    for (const auto key : {"flow_id", "task_instance_id", "step_id"}) {
+    for (const auto key :
+         {"flow_id", "task_instance_id", "step_id", "operation"}) {
       if (const auto value = record.attributes.find(key);
           value != record.attributes.end()) {
         retry_key += value->second;
@@ -121,6 +140,11 @@ void consume_record(Shard& shard, LogRecord record, const AnalyzeOptions& option
     if (retry_key.empty()) retry_key = record.endpoint;
     shard.retry_rounds[retry_key] =
         std::max(shard.retry_rounds[retry_key], record.retry_round);
+    if (const auto operation = record.attributes.find("operation");
+        operation != record.attributes.end())
+      shard.retry_operations[operation->second] =
+          std::max(shard.retry_operations[operation->second],
+                   record.retry_round);
   }
 
   if (const auto state = record.attributes.find("state");
@@ -179,6 +203,10 @@ void merge_shard(AnalysisResult& result, Shard& shard) {
   result.advisory_events += shard.advisory_events;
   for (const auto& [_, round] : shard.retry_rounds)
     result.retries += round > 0 ? round - 1 : 0;
+  for (const auto& [operation, round] : shard.retry_operations)
+    result.retry_operations[operation] =
+        std::max(result.retry_operations[operation],
+                 static_cast<std::uint64_t>(round));
   result.completed_jobs += shard.completed_jobs;
   result.completed_stages += shard.completed_stages;
   result.completed_tasks += shard.completed_tasks;
@@ -194,6 +222,15 @@ void merge_shard(AnalysisResult& result, Shard& shard) {
   merge_vectors(result.service_latencies, shard.service_latencies);
   for (auto& [key, stats] : shard.errors) {
     auto& target = result.errors[key];
+    target.total += stats.total;
+    target.previous += stats.previous;
+    target.recent += stats.recent;
+    merge_counts(target.services, stats.services);
+    merge_counts(target.endpoints, stats.endpoints);
+    if (target.example.empty()) target.example = std::move(stats.example);
+  }
+  for (auto& [key, stats] : shard.exception_groups) {
+    auto& target = result.exception_groups[key];
     target.total += stats.total;
     target.previous += stats.previous;
     target.recent += stats.recent;
@@ -226,6 +263,7 @@ AnalysisResult analyze_file(const std::filesystem::path& path,
   detail::InputBuffer input(path, options.io_mode);
 
   AnalysisResult result;
+  result.source_file = path.filename().string();
   result.bytes = input.size();
   if (input.size() == 0) return result;
 
@@ -239,9 +277,17 @@ AnalysisResult analyze_file(const std::filesystem::path& path,
   result.container_format = std::move(decoded.container_name);
 
   Shard shard;
-  for (auto& record : decoded.records)
+  for (auto& record : decoded.records) {
+    if (!record.timestamp.empty()) {
+      if (result.first_timestamp.empty() ||
+          record.timestamp < result.first_timestamp)
+        result.first_timestamp = record.timestamp;
+      if (result.last_timestamp.empty() || record.timestamp > result.last_timestamp)
+        result.last_timestamp = record.timestamp;
+    }
     consume_record(shard, std::move(record), options, input.size(),
                    decoded.reverse_order);
+  }
   merge_shard(result, shard);
 
   if (result.outcome == "unknown" && result.matched > 0) {
