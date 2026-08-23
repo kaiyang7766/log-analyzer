@@ -38,6 +38,14 @@ int main() {
   const auto root_a = normalize_error("outer", "RuntimeError\nCaused by: Connection failed at 0x1234");
   const auto root_b = normalize_error("different outer", "RuntimeError\nCaused by: Connection failed at 0xabcd");
   expect(root_a == root_b, "stack root causes and addresses should normalize");
+  expect(normalize_error(
+             "Host 10.20.30.40 request "
+             "550E8400-E29B-41D4-A716-446655440000 took 12.5 ms") ==
+             "host <ip> request <uuid> took <n> ms",
+         "IP addresses, UUIDs, and decimals should normalize");
+  expect(normalize_error("  error\tfor item123 and 123item  ") ==
+             "error for item123 and 123item",
+         "whitespace should collapse without replacing embedded numbers");
 
   const auto percentiles = calculate_percentiles({10, 20, 30, 40, 50});
   expect(percentiles.count == 5, "percentile sample count");

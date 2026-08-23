@@ -81,8 +81,8 @@ std::string compact_evidence(std::string value, std::size_t limit = 240) {
   return value;
 }
 
-void consume_record(Shard& shard, LogRecord record, const AnalyzeOptions& options,
-                    std::size_t input_size, bool reverse_order) {
+void consume_record(Shard& shard, LogRecord record,
+                    const AnalyzeOptions& options, std::size_t input_size) {
   if (record.failure) shard.saw_failure_evidence = true;
   if (record.terminal_success) {
     shard.saw_terminal_success = true;
@@ -104,19 +104,30 @@ void consume_record(Shard& shard, LogRecord record, const AnalyzeOptions& option
   if (!record.logger.empty()) ++shard.loggers[record.logger];
 
   const auto level = lower(record.severity);
+  std::string message_fingerprint;
+  std::string record_fingerprint;
+  const auto normalized_record = [&]() -> const std::string& {
+    if (record_fingerprint.empty()) {
+      if (record.stack_trace.empty() && !message_fingerprint.empty())
+        record_fingerprint = message_fingerprint;
+      else
+        record_fingerprint =
+            normalize_error(record.message, record.stack_trace);
+    }
+    return record_fingerprint;
+  };
   if (level == "warn" || level == "warning") {
     ++shard.warnings;
-    ++shard.warning_patterns[normalize_error(record.message)];
+    message_fingerprint = normalize_error(record.message);
+    ++shard.warning_patterns[message_fingerprint];
   }
   if (record.failure) ++shard.error_events;
   if (record.exception) {
     ++shard.exception_events;
-    const auto normalized = normalize_error(record.message, record.stack_trace);
-    auto& stats = shard.exception_groups[normalized];
+    auto& stats = shard.exception_groups[normalized_record()];
     ++stats.total;
     const bool in_later_half = record.offset >= input_size / 2;
-    const bool recent = reverse_order ? !in_later_half : in_later_half;
-    if (recent)
+    if (in_later_half)
       ++stats.recent;
     else
       ++stats.previous;
@@ -164,12 +175,10 @@ void consume_record(Shard& shard, LogRecord record, const AnalyzeOptions& option
   }
 
   if (record.failure) {
-    const auto normalized = normalize_error(record.message, record.stack_trace);
-    auto& stats = shard.errors[normalized];
+    auto& stats = shard.errors[normalized_record()];
     ++stats.total;
     const bool in_later_half = record.offset >= input_size / 2;
-    const bool recent = reverse_order ? !in_later_half : in_later_half;
-    if (recent)
+    if (in_later_half)
       ++stats.recent;
     else
       ++stats.previous;
@@ -179,6 +188,13 @@ void consume_record(Shard& shard, LogRecord record, const AnalyzeOptions& option
   }
 
   if (options.retain_records) shard.records.push_back(std::move(record));
+}
+
+void reverse_stat_halves(Shard& shard) {
+  for (auto& [_, stats] : shard.errors)
+    std::swap(stats.previous, stats.recent);
+  for (auto& [_, stats] : shard.exception_groups)
+    std::swap(stats.previous, stats.recent);
 }
 
 template <typename Map>
@@ -267,8 +283,20 @@ AnalysisResult analyze_file(const std::filesystem::path& path,
   result.bytes = input.size();
   if (input.size() == 0) return result;
 
-  auto decoded =
-      detail::decode_input(std::string_view(input.data(), input.size()), options);
+  Shard shard;
+  auto decoded = detail::decode_input(
+      std::string_view(input.data(), input.size()), options,
+      [&](LogRecord&& record) {
+        if (!record.timestamp.empty()) {
+          if (result.first_timestamp.empty() ||
+              record.timestamp < result.first_timestamp)
+            result.first_timestamp = record.timestamp;
+          if (result.last_timestamp.empty() ||
+              record.timestamp > result.last_timestamp)
+            result.last_timestamp = record.timestamp;
+        }
+        consume_record(shard, std::move(record), options, input.size());
+      });
   result.lines = decoded.physical_lines;
   result.events = decoded.logical_events;
   result.continuations = decoded.continuation_lines;
@@ -276,18 +304,7 @@ AnalysisResult analyze_file(const std::filesystem::path& path,
   result.detected_format = std::move(decoded.format_name);
   result.container_format = std::move(decoded.container_name);
 
-  Shard shard;
-  for (auto& record : decoded.records) {
-    if (!record.timestamp.empty()) {
-      if (result.first_timestamp.empty() ||
-          record.timestamp < result.first_timestamp)
-        result.first_timestamp = record.timestamp;
-      if (result.last_timestamp.empty() || record.timestamp > result.last_timestamp)
-        result.last_timestamp = record.timestamp;
-    }
-    consume_record(shard, std::move(record), options, input.size(),
-                   decoded.reverse_order);
-  }
+  if (decoded.reverse_order) reverse_stat_halves(shard);
   merge_shard(result, shard);
 
   if (result.outcome == "unknown" && result.matched > 0) {

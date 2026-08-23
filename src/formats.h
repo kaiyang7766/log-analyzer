@@ -2,9 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include "logscope/model.h"
 
@@ -19,10 +19,12 @@ struct DecodedInput {
   std::uint64_t continuation_lines = 0;
   std::uint64_t malformed = 0;
   bool reverse_order = false;
-  std::vector<LogRecord> records;
 };
 
-DecodedInput decode_input(std::string_view input, const AnalyzeOptions& options);
+using RecordConsumer = std::function<void(LogRecord&&)>;
+
+DecodedInput decode_input(std::string_view input, const AnalyzeOptions& options,
+                          const RecordConsumer& consume);
 std::string_view input_format_name(InputFormat format);
 
 }  // namespace logscope::detail

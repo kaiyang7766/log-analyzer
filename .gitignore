@@ -1,4 +1,5 @@
 /build/
 /build-release/
+/build-asan/
 /cmake-build-*/
 .DS_Store
