@@ -180,6 +180,77 @@ void render_latency_map(std::ostream& out,
   out << "\n";
 }
 
+std::vector<std::pair<std::string, std::string>> scheduler_fields(
+    const SchedulerSummary& scheduler) {
+  std::vector<std::pair<std::string, std::string>> fields;
+  if (!scheduler.instance_id.empty())
+    fields.emplace_back("Instance", scheduler.instance_id);
+  if (!scheduler.state_path.empty()) {
+    std::string path;
+    for (const auto& state : scheduler.state_path) {
+      if (!path.empty()) path += " -> ";
+      path += state;
+    }
+    fields.emplace_back("Status path", path);
+  }
+  if (!scheduler.exit_code.empty()) fields.emplace_back("Exit code", scheduler.exit_code);
+  if (scheduler.max_retries > 0 || scheduler.current_retry > 0) {
+    auto retries = std::to_string(scheduler.current_retry);
+    if (scheduler.max_retries > 0) retries += " of " + std::to_string(scheduler.max_retries);
+    if (scheduler.retry_exhausted) retries += " (exhausted)";
+    fields.emplace_back("Retries used", retries);
+  }
+  std::uint64_t framed = 0;
+  std::string formats;
+  for (const auto& [format, count] : sorted_counts(scheduler.task_events)) {
+    framed += count;
+    if (!formats.empty()) formats += ", ";
+    formats += format + " " + std::to_string(count);
+  }
+  auto task_output = std::to_string(framed) + " framed events";
+  if (!formats.empty()) task_output += " (" + formats + ")";
+  task_output += "; " + std::to_string(scheduler.unframed_task_lines) + " unframed lines";
+  fields.emplace_back("Task output", task_output);
+  return fields;
+}
+
+void render_scheduler(std::ostream& out, const SchedulerSummary& scheduler,
+                      OutputFormat format) {
+  heading(out, format, "Scheduler instance");
+  for (const auto& [name, value] : scheduler_fields(scheduler)) {
+    if (format == OutputFormat::markdown) out << "- " << name << ": `" << value << "`\n";
+    else out << name << ": " << value << '\n';
+  }
+  out << '\n';
+}
+
+void render_scheduler_json(std::ostream& out, const SchedulerSummary& scheduler) {
+  out << "  \"scheduler\": {\n"
+      << "    \"instance_id\": \"" << json_escape(scheduler.instance_id) << "\",\n"
+      << "    \"state_path\": [";
+  for (std::size_t index = 0; index < scheduler.state_path.size(); ++index) {
+    if (index != 0) out << ", ";
+    out << '"' << json_escape(scheduler.state_path[index]) << '"';
+  }
+  out << "],\n"
+      << "    \"last_state\": \"" << json_escape(scheduler.last_state) << "\",\n"
+      << "    \"exit_code\": \"" << json_escape(scheduler.exit_code) << "\",\n"
+      << "    \"current_retry\": " << scheduler.current_retry << ",\n"
+      << "    \"max_retries\": " << scheduler.max_retries << ",\n"
+      << "    \"retry_exhausted\": " << (scheduler.retry_exhausted ? "true" : "false")
+      << ",\n"
+      << "    \"task_events\": {";
+  const auto task_events = sorted_counts(scheduler.task_events);
+  for (std::size_t index = 0; index < task_events.size(); ++index) {
+    if (index != 0) out << ", ";
+    out << '"' << json_escape(task_events[index].first)
+        << "\": " << task_events[index].second;
+  }
+  out << "},\n"
+      << "    \"unframed_task_lines\": " << scheduler.unframed_task_lines << "\n"
+      << "  },\n";
+}
+
 void render_analysis_json(std::ostream& out, const AnalysisResult& result,
                           std::size_t limit) {
   out << "{\n"
@@ -209,8 +280,10 @@ void render_analysis_json(std::ostream& out, const AnalysisResult& result,
       << "    \"failed_jobs\": " << result.failed_jobs << ",\n"
       << "    \"failed_stages\": " << result.failed_stages << ",\n"
       << "    \"failed_tasks\": " << result.failed_tasks << "\n"
-      << "  },\n"
-      << "  \"errors\": [";
+      << "  },\n";
+  if (result.detected_format == "scheduler")
+    render_scheduler_json(out, result.scheduler);
+  out << "  \"errors\": [";
   const auto errors = sorted_error_groups(result.errors);
   for (std::size_t index = 0; index < std::min(limit, errors.size()); ++index) {
     const auto& [name, stats] = errors[index];
@@ -377,6 +450,8 @@ void render_analysis(std::ostream& out, const AnalysisResult& result, const Rend
           << " completed, " << result.failed_tasks << " failed\n\n";
     }
   }
+  if (result.detected_format == "scheduler")
+    render_scheduler(out, result.scheduler, options.format);
   if (!result.errors.empty()) {
     heading(out, options.format, "Errors increasing in the recent half");
     render_error_rows(out, sorted_error_groups(result.errors), options.format,

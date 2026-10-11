@@ -27,13 +27,16 @@ Filters:
   --text TEXT            Search message and stack trace (case-insensitive)
 
 Input:
-  --input-format FORMAT  auto|jsonl|app-export|logback|spark-syslog|flink-console
-  --timezone SUFFIX      Append an offset to Spark/Flink timestamps, for example +08:00
+  --input-format FORMAT  auto|jsonl|app-export|logback|spark-syslog|flink-console|
+                         scheduler
+  --timezone SUFFIX      Append an offset to Spark, Flink, and scheduler timestamps,
+                         for example +08:00
   --io buffered|mmap     Select the input ownership strategy
 
 Notes:
   Auto detection supports JSONL, enriched application exports, raw Logback,
-  Spark syslog, Flink console logs, and Spark syslog inside an HTML xmp element.
+  Spark syslog, Flink console logs, scheduler instance logs, and Spark syslog
+  inside an HTML xmp element.
   "recent" compares chronological halves, including reverse-ordered exports.
 )";
 
@@ -64,9 +67,10 @@ logscope::InputFormat parse_input_format(std::string_view value) {
   if (value == "logback") return logscope::InputFormat::logback;
   if (value == "spark-syslog") return logscope::InputFormat::spark_syslog;
   if (value == "flink-console") return logscope::InputFormat::flink_console;
+  if (value == "scheduler") return logscope::InputFormat::scheduler;
   throw std::runtime_error(
       "--input-format must be auto, jsonl, app-export, logback, spark-syslog, "
-      "or flink-console");
+      "flink-console, or scheduler");
 }
 
 Cli parse_cli(int argc, char** argv) {

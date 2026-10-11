@@ -29,11 +29,14 @@ Auto detection currently recognizes:
 - Flink JobManager console logs such as `jobmanager.out`
 - NUL-padded Flink `jobmanager.log` files with full-year, column-aligned timestamps
 - browser-saved Spark syslog wrapped in an HTML `<xmp>` element
+- scheduler instance logs with ISO `T` timestamps that embed the task's own
+  output: Flink client log4j lines, Spark console lines, two-line
+  `java.util.logging` records, and plain stdout
 
 Use `--input-format` when automatic detection is ambiguous:
 
 ```bash
---input-format auto|jsonl|app-export|logback|spark-syslog|flink-console
+--input-format auto|jsonl|app-export|logback|spark-syslog|flink-console|scheduler
 ```
 
 Multiline stack traces and diagnostic blocks are attached to the preceding
@@ -63,6 +66,7 @@ On Debian/Ubuntu, install `cmake`, `ninja-build`, `g++`, and
 ./build/logscope analyze incident.txt
 ./build/logscope analyze spark.syslog.html --timezone +08:00
 ./build/logscope analyze jobmanager.out --timezone +08:00
+./build/logscope analyze scheduler-instance.log --timezone +08:00
 ./build/logscope errors incident.txt --group-by service
 ./build/logscope latency spark.syslog.html --group-by endpoint
 ./build/logscope analyze incident.txt --text timeout --format markdown
@@ -101,7 +105,7 @@ Common filters and output controls:
 `--limit` caps grouped output rows; it does not change which records are
 analyzed.
 
-Spark and Flink console timestamps have no timezone in the source format.
+Spark, Flink, and scheduler timestamps have no timezone in the source format.
 `--timezone +08:00` appends an explicit offset after normalization. If omitted,
 timestamps remain timezone-unspecified.
 
@@ -111,7 +115,9 @@ The parser is split into these stages:
 
 1. Container decoding selects the relevant view from plain, NUL-padded, or
    HTML/XMP-wrapped input.
-2. Content scoring selects JSONL, application-export, Logback, Spark, or Flink framing.
+2. Content scoring selects JSONL, application-export, Logback, Spark, Flink, or
+   scheduler framing. Scheduler headers win over Spark and Flink lines because
+   scheduler logs embed the task's own Spark or Flink output.
 3. Format-specific framers stream complete logical event views to their decoder.
 4. Decoders map source headers into a shared `LogRecord`.
 5. Semantic enrichers classify workflow attempts, retries, state transitions,
@@ -139,6 +145,14 @@ Severity and incident outcome are deliberately separate:
 
 This prevents a successful Spark application with noisy startup warnings from
 being summarized as a failed incident.
+
+For scheduler logs, only the scheduler's instance status is terminal. A Flink
+job reported as `FAILED` inside the task output counts as a failed job and a
+failure event, but cannot override an instance that the scheduler reports as
+`SUCCEEDED`. `FAILED_RETRY` resolves to `failed` with evidence that another
+retry is pending. An instance whose last status is non-terminal, such as
+`RUNNING`, stays `unknown` even when failure events are present, and the
+evidence names that status.
 
 ## Extracted Signals
 
@@ -169,6 +183,19 @@ Flink console logs:
 - retry-exhaustion failure evidence when no explicit terminal marker exists
 - terminal job states when present
 
+Scheduler instance logs:
+
+- instance ID, status path, exit code, and retries used against the maximum
+- terminal status from status transitions and `execute`/`Shutdown`/`Exit`
+  status lines
+- scheduler errors and exceptions, including their stack traces
+- task output framed by its own headers, so stack traces attach to the task
+  event that logged them rather than to the preceding lifecycle message
+- plain task stdout counted as unframed lines, not attached as stack traces
+- lines re-fetched from the job manager, with their original header restored
+- known agent noise (metrics-agent and log-shipping connection failures)
+  classified as advisory: counted as warnings, not as failures or exceptions
+
 ## Output
 
 `analyze` includes:
@@ -183,6 +210,8 @@ Flink console logs:
 - normalized failure, exception, and warning groups
 - service/endpoint counts and latency percentiles in text and Markdown output
 - logger activity and retry operations for Flink input
+- instance status path, exit code, retries, and task-output breakdown for
+  scheduler input
 
 Markdown table cells are escaped, and JSON output is valid structured data rather
 than a text report wrapped in JSON. Use `--limit` to bound the number of rows in
@@ -200,6 +229,11 @@ The test suite includes sanitized fixtures modeled on:
   and terminal job states
 - a generated NUL-padded, full-year `jobmanager.log` variant with aligned logger
   and thread columns
+- a failed scheduler instance with retries, replayed lines, embedded Flink
+  client, Spark console, and `java.util.logging` output, agent noise, and a
+  multiline task root cause
+- generated scheduler variants covering embedded output that would otherwise
+  be detected as Flink, a still-running instance, and `FAILED_RETRY`
 
 No workplace hosts, users, service names, IDs, URLs, payloads, or internal code
 are included in the fixtures.

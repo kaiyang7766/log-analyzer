@@ -37,7 +37,8 @@ enum class InputFormat {
   app_export,
   logback,
   spark_syslog,
-  flink_console
+  flink_console,
+  scheduler
 };
 
 struct AnalyzeOptions {
@@ -82,6 +83,19 @@ struct ErrorStats {
   std::string example;
 };
 
+struct SchedulerSummary {
+  std::string instance_id;
+  std::string last_state;
+  std::string last_state_timestamp;
+  std::string exit_code;
+  std::uint32_t current_retry = 0;
+  std::uint32_t max_retries = 0;
+  bool retry_exhausted = false;
+  std::vector<std::string> state_path;
+  std::unordered_map<std::string, std::uint64_t> task_events;
+  std::uint64_t unframed_task_lines = 0;
+};
+
 struct AnalysisResult {
   std::string source_file;
   std::uint64_t lines = 0;
@@ -118,6 +132,7 @@ struct AnalysisResult {
   std::unordered_map<std::string, ErrorStats> exception_groups;
   std::unordered_map<std::string, std::vector<double>> endpoint_latencies;
   std::unordered_map<std::string, std::vector<double>> service_latencies;
+  SchedulerSummary scheduler;
   std::vector<LogRecord> records;
 };
 

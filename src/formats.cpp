@@ -288,8 +288,18 @@ bool parse_flink_header(std::string_view line, std::string_view default_timezone
     const auto level = take_token(remainder, cursor);
     if (!is_level(level)) return false;
 
-    const auto message_separator = remainder.find("[] - ", cursor);
-    if (message_separator == std::string_view::npos) return false;
+    auto message_separator = remainder.find("[] - ", cursor);
+    std::size_t message_start = 0;
+    if (message_separator != std::string_view::npos) {
+      message_start = message_separator + 5;
+    } else {
+      // Flink clients omit the thread and MDC columns: "logger - message".
+      message_separator = remainder.find(" - ", cursor);
+      if (message_separator == std::string_view::npos && remainder.ends_with(" -"))
+        message_separator = remainder.size() - 2;
+      if (message_separator == std::string_view::npos) return false;
+      message_start = std::min(message_separator + 3, remainder.size());
+    }
     auto context = trim_view(
         remainder.substr(cursor, message_separator - cursor));
     std::size_t context_cursor = 0;
@@ -305,8 +315,7 @@ bool parse_flink_header(std::string_view line, std::string_view default_timezone
     record->source = record->logger;
     record->thread = std::string(thread);
     record->service = "flink";
-    record->message =
-        std::string(trim_view(remainder.substr(message_separator + 5)));
+    record->message = std::string(trim_view(remainder.substr(message_start)));
     return true;
   }
 
@@ -337,6 +346,147 @@ bool parse_flink_header(std::string_view line, std::string_view default_timezone
   return true;
 }
 
+std::size_t iso_timestamp_length(std::string_view value) {
+  static constexpr std::array<std::size_t, 14> digits{0, 1, 2, 3, 5, 6, 8,
+                                                      9, 11, 12, 14, 15, 17, 18};
+  if (value.size() < 19 || value[4] != '-' || value[7] != '-' ||
+      value[10] != 'T' || value[13] != ':' || value[16] != ':')
+    return 0;
+  for (const auto index : digits)
+    if (!std::isdigit(static_cast<unsigned char>(value[index]))) return 0;
+  std::size_t length = 19;
+  if (length < value.size() && value[length] == '.') {
+    auto end = length + 1;
+    while (end < value.size() &&
+           std::isdigit(static_cast<unsigned char>(value[end])))
+      ++end;
+    if (end > length + 1) length = end;
+  }
+  return length;
+}
+
+bool parse_scheduler_header(std::string_view line, std::string_view default_timezone,
+                            LogRecord* record) {
+  auto length = iso_timestamp_length(line);
+  if (length == 0 || length >= line.size() || line[length] != ' ') return false;
+  std::size_t cursor = length;
+  auto level = take_token(line, cursor);
+  if (!is_level(level)) return false;
+  if (!record) return true;
+
+  auto timestamp = line.substr(0, length);
+  auto message = trim_view(line.substr(cursor));
+  // Logs fetched again from the job manager keep their original header.
+  while (true) {
+    length = iso_timestamp_length(message);
+    if (length == 0 || length >= message.size() || message[length] != ' ') break;
+    std::size_t inner_cursor = length;
+    const auto inner_level = take_token(message, inner_cursor);
+    if (!is_level(inner_level)) break;
+    timestamp = message.substr(0, length);
+    level = inner_level;
+    message = trim_view(message.substr(inner_cursor));
+    record->attributes["replayed"] = "true";
+  }
+  record->timestamp = std::string(timestamp);
+  record->timestamp.append(default_timezone);
+  record->severity = std::string(level);
+  record->service = "scheduler";
+  record->endpoint = "scheduler";
+  record->message = std::string(message);
+  return true;
+}
+
+// java.util.logging SimpleFormatter writes "Mar 11, 2026 12:56:08 AM source
+// method" and puts "LEVEL: message" on the following line.
+bool parse_java_logging_header(std::string_view line,
+                               std::string_view default_timezone,
+                               LogRecord* record) {
+  static constexpr std::array<std::string_view, 12> months{
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  if (line.size() < 23 || line[3] != ' ') return false;
+  const auto month = std::find(months.begin(), months.end(), line.substr(0, 3));
+  if (month == months.end()) return false;
+
+  std::size_t cursor = 3;
+  const auto day = take_token(line, cursor);
+  const auto year = take_token(line, cursor);
+  const auto time = take_token(line, cursor);
+  const auto meridiem = take_token(line, cursor);
+  if (day.size() < 2 || day.size() > 3 || day.back() != ',' ||
+      !all_digits(day.substr(0, day.size() - 1)) || year.size() != 4 ||
+      !all_digits(year) || (meridiem != "AM" && meridiem != "PM"))
+    return false;
+  const auto colon = time.find(':');
+  if (colon == std::string_view::npos || colon == 0 || colon > 2 ||
+      time.size() != colon + 6 || time[colon + 3] != ':' ||
+      !all_digits(time.substr(0, colon)) ||
+      !all_digits(time.substr(colon + 1, 2)) ||
+      !all_digits(time.substr(colon + 4, 2)))
+    return false;
+  int hour = 0;
+  (void)std::from_chars(time.data(), time.data() + colon, hour);
+  if (hour < 1 || hour > 12) return false;
+  if (!record) return true;
+
+  hour %= 12;
+  if (meridiem == "PM") hour += 12;
+  const auto month_number = month - months.begin() + 1;
+  std::string timestamp(year);
+  timestamp.push_back('-');
+  if (month_number < 10) timestamp.push_back('0');
+  timestamp.append(std::to_string(month_number));
+  timestamp.push_back('-');
+  if (day.size() == 2) timestamp.push_back('0');
+  timestamp.append(day.substr(0, day.size() - 1));
+  timestamp.push_back('T');
+  if (hour < 10) timestamp.push_back('0');
+  timestamp.append(std::to_string(hour));
+  timestamp.append(time.substr(colon));
+  timestamp.append(default_timezone);
+
+  const auto source = trim_view(line.substr(cursor));
+  std::size_t source_cursor = 0;
+  record->timestamp = std::move(timestamp);
+  record->logger = std::string(take_token(source, source_cursor));
+  record->source = std::string(source);
+  return true;
+}
+
+std::string_view java_logging_level(std::string_view line) {
+  static constexpr std::array<std::string_view, 7> levels{
+      "SEVERE", "WARNING", "INFO", "CONFIG", "FINE", "FINER", "FINEST"};
+  const auto colon = line.find(':');
+  if (colon == std::string_view::npos) return {};
+  const auto level = line.substr(0, colon);
+  return std::find(levels.begin(), levels.end(), level) != levels.end()
+             ? level
+             : std::string_view{};
+}
+
+std::string_view canonical_java_logging_level(std::string_view level) {
+  if (level == "SEVERE") return "ERROR";
+  if (level == "WARNING") return "WARN";
+  if (level == "INFO" || level == "CONFIG") return "INFO";
+  return "DEBUG";
+}
+
+enum class SchedulerLine { none, scheduler, log4j, spark_console, java_logging };
+
+SchedulerLine scheduler_line_kind(std::string_view line) {
+  if (parse_scheduler_header(line, {}, nullptr)) return SchedulerLine::scheduler;
+  if (parse_spark_header(line, {}, nullptr)) return SchedulerLine::spark_console;
+  if (parse_flink_header(line, {}, nullptr)) {
+    const auto start = line.find_first_not_of(" \t");
+    return line[start + 2] == '/' ? SchedulerLine::spark_console
+                                  : SchedulerLine::log4j;
+  }
+  if (parse_java_logging_header(line, {}, nullptr))
+    return SchedulerLine::java_logging;
+  return SchedulerLine::none;
+}
+
 InputFormat detect_format(std::string_view content, InputFormat requested) {
   if (requested != InputFormat::auto_detect) return requested;
 
@@ -345,6 +495,7 @@ InputFormat detect_format(std::string_view content, InputFormat requested) {
   std::size_t export_headers = 0;
   std::size_t spark_headers = 0;
   std::size_t flink_headers = 0;
+  std::size_t scheduler_headers = 0;
   std::size_t examined = 0;
   while (cursor < content.size() && examined < 200) {
     const auto end = content.find('\n', cursor);
@@ -359,12 +510,16 @@ InputFormat detect_format(std::string_view content, InputFormat requested) {
       }
       if (parse_spark_header(line, {}, nullptr)) ++spark_headers;
       if (parse_flink_header(line, {}, nullptr)) ++flink_headers;
+      if (parse_scheduler_header(line, {}, nullptr)) ++scheduler_headers;
       if (examined == 1 && trim_view(line).starts_with('{')) return InputFormat::jsonl;
     }
     if (end == std::string_view::npos) break;
     cursor = end + 1;
   }
 
+  // Scheduler logs embed task output that may itself look like Spark or Flink.
+  if (scheduler_headers >= 2 && scheduler_headers >= app_headers)
+    return InputFormat::scheduler;
   if (spark_headers >= 2 && spark_headers >= app_headers) return InputFormat::spark_syslog;
   if (flink_headers >= 2 && flink_headers >= app_headers) return InputFormat::flink_console;
   if (export_headers >= 1) return InputFormat::app_export;
@@ -778,6 +933,232 @@ void enrich_flink_record(LogRecord& record) {
   }
 }
 
+bool scheduler_success_state(std::string_view state) {
+  return state.starts_with("SUCCEEDED") || state == "SUCCESS";
+}
+
+bool scheduler_failure_state(std::string_view state) {
+  return state.starts_with("FAILED") || state == "KILLED" ||
+         state.starts_with("CANCEL");
+}
+
+std::string scheduler_instance_id(std::string_view message) {
+  for (const auto marker : {"Instance created with id ", "new Instance ",
+                            "for instance with id ", "instance["}) {
+    auto id = token_after(message, marker);
+    if (all_digits(id)) return id;
+  }
+  return {};
+}
+
+void enrich_scheduler_record(LogRecord& record) {
+  const auto message = std::string_view(record.message);
+  const auto level = lower(record.severity);
+  record.failure = level == "error" || level == "fatal" || level == "critical";
+  record.event_kind = record.failure ? "failure" : "log";
+
+  if (auto id = scheduler_instance_id(message); !id.empty())
+    record.attributes["instance_id"] = std::move(id);
+
+  std::string status;
+  if (const auto marker = message.find("change instance status from ");
+      marker != std::string_view::npos) {
+    const auto transition = message.substr(marker);
+    const auto destination = transition.find(" to ");
+    if (destination != std::string_view::npos) {
+      record.event_kind = "state_transition";
+      record.attributes["previous_state"] = token_after(transition, "status from ");
+      status = token_after(transition.substr(destination), " to ");
+    }
+  } else {
+    for (const auto marker : {"execute status:", "Shutdown status:", "Exit status:"}) {
+      if (message.starts_with(marker)) {
+        record.event_kind = "instance_status";
+        status = token_after(message, marker);
+        break;
+      }
+    }
+  }
+  while (!status.empty() && (status.back() == '.' || status.back() == ','))
+    status.pop_back();
+  if (record.event_kind == "state_transition") record.attributes["state"] = status;
+  // Status lines restate the transition, so only the transition itself is
+  // counted as a failure event.
+  if (scheduler_success_state(status)) {
+    record.terminal_success = true;
+  } else if (scheduler_failure_state(status)) {
+    record.terminal_failure = true;
+    if (record.event_kind == "state_transition") record.failure = true;
+  }
+  // Engine polling reports failure before the instance changes state.
+  if (scheduler_failure_state(token_after(message, " job status:")))
+    record.failure = true;
+
+  auto exit_code = token_after(message, "execute finished, result=");
+  if (exit_code.empty()) exit_code = token_after(message, "will exit in code:");
+  if (all_digits(exit_code)) record.attributes["exit_code"] = std::move(exit_code);
+
+  bool saw_retry = false;
+  std::uint32_t retry = 0;
+  if (message.find("current attemptId is ") != std::string_view::npos) {
+    saw_retry = true;
+    retry = unsigned_after(message, "current attemptId is ");
+  }
+  if (message.find("max retry (") != std::string_view::npos) {
+    saw_retry = true;
+    retry = unsigned_after(message, "current retry (");
+    record.attributes["max_retries"] =
+        std::to_string(unsigned_after(message, "max retry ("));
+  }
+  if (saw_retry) record.attributes["current_retry"] = std::to_string(retry);
+  if (retry > 0) {
+    record.event_kind = "retry_attempt";
+    record.retry_round = retry + 1;
+    record.attributes["operation"] = "instance";
+  }
+  if (message.find("retry exhausted") != std::string_view::npos)
+    record.attributes["retry_exhausted"] = "true";
+}
+
+void update_scheduler_summary(SchedulerSummary& summary, const LogRecord& record) {
+  const auto attribute = [&](const std::string& key) -> std::string_view {
+    const auto found = record.attributes.find(key);
+    return found == record.attributes.end() ? std::string_view{}
+                                            : std::string_view(found->second);
+  };
+  if (summary.instance_id.empty())
+    summary.instance_id = std::string(attribute("instance_id"));
+  if (record.event_kind == "state_transition") {
+    const auto previous = attribute("previous_state");
+    if (!previous.empty() &&
+        (summary.state_path.empty() || summary.state_path.back() != previous))
+      summary.state_path.emplace_back(previous);
+    summary.last_state = std::string(attribute("state"));
+    summary.last_state_timestamp = record.timestamp;
+    summary.state_path.push_back(summary.last_state);
+  }
+  if (const auto exit_code = attribute("exit_code"); !exit_code.empty())
+    summary.exit_code = std::string(exit_code);
+  const auto number = [](std::string_view value) {
+    std::uint32_t parsed = 0;
+    (void)std::from_chars(value.data(), value.data() + value.size(), parsed);
+    return parsed;
+  };
+  if (const auto retry = attribute("current_retry"); !retry.empty())
+    summary.current_retry = std::max(summary.current_retry, number(retry));
+  if (const auto maximum = attribute("max_retries"); !maximum.empty())
+    summary.max_retries = number(maximum);
+  if (!attribute("retry_exhausted").empty()) summary.retry_exhausted = true;
+}
+
+// Local metrics and log-shipping agents that cannot connect repeat these
+// messages throughout task output without affecting the task itself.
+bool task_infrastructure_noise(const LogRecord& record) {
+  return (record.logger.ends_with("UnixSocketClient") &&
+          record.message.find("connect to agent failed") != std::string::npos) ||
+         record.message.starts_with("send msg in cache fail");
+}
+
+// Java exception types are CamelCase, so words such as "exceptional" and
+// metric names such as "client.exception" do not mark an exception.
+bool names_exception_type(std::string_view message) {
+  constexpr std::string_view type_suffix = "Exception";
+  for (auto position = message.find(type_suffix);
+       position != std::string_view::npos;
+       position = message.find(type_suffix, position + 1)) {
+    const auto end = position + type_suffix.size();
+    if (end == message.size() ||
+        !std::isalnum(static_cast<unsigned char>(message[end])))
+      return true;
+  }
+  return false;
+}
+
+std::uint64_t count_nonblank_lines(std::string_view text) {
+  std::uint64_t count = 0;
+  std::size_t cursor = 0;
+  while (cursor < text.size()) {
+    const auto end = text.find('\n', cursor);
+    const auto line_end = end == std::string_view::npos ? text.size() : end;
+    if (!trim_view(text.substr(cursor, line_end - cursor)).empty()) ++count;
+    cursor = line_end + 1;
+  }
+  return count;
+}
+
+bool decode_scheduler_event(const EventSpan& event, const AnalyzeOptions& options,
+                            DecodedInput& decoded, LogRecord& record) {
+  record.offset = event.offset;
+  const auto timezone = std::string_view(options.default_timezone);
+  const auto kind = scheduler_line_kind(event.header);
+  if (kind == SchedulerLine::none) return false;
+
+  if (kind == SchedulerLine::scheduler) {
+    parse_scheduler_header(event.header, timezone, &record);
+    // Task stdout printed between lifecycle messages is not their stack trace.
+    const auto level = lower(record.severity);
+    if (level == "warn" || level == "error" || level == "fatal")
+      record.stack_trace = continuation_text(event.continuation);
+    else
+      decoded.scheduler.unframed_task_lines +=
+          count_nonblank_lines(event.continuation);
+    record.exception = has_exception_line(record.stack_trace) ||
+                       names_exception_type(record.message);
+    enrich_scheduler_record(record);
+    update_scheduler_summary(decoded.scheduler, record);
+    return true;
+  }
+
+  auto continuation = event.continuation;
+  std::string task_format;
+  if (kind == SchedulerLine::java_logging) {
+    task_format = "java-logging";
+    parse_java_logging_header(event.header, timezone, &record);
+    const auto end = continuation.find('\n');
+    auto first = continuation.substr(
+        0, end == std::string_view::npos ? continuation.size() : end);
+    if (!first.empty() && first.back() == '\r') first.remove_suffix(1);
+    if (const auto level = java_logging_level(first); !level.empty()) {
+      record.severity = std::string(canonical_java_logging_level(level));
+      record.message = std::string(trim_view(first.substr(level.size() + 1)));
+      continuation = end == std::string_view::npos ? std::string_view{}
+                                                   : continuation.substr(end + 1);
+    }
+  } else if (kind == SchedulerLine::spark_console) {
+    task_format = "spark-console";
+    if (!parse_spark_header(event.header, timezone, &record))
+      parse_flink_header(event.header, timezone, &record);
+  } else {
+    task_format = "log4j";
+    parse_flink_header(event.header, timezone, &record);
+    // Keep fractional seconds comparable with scheduler timestamps.
+    if (record.timestamp.size() > 19 && record.timestamp[19] == ',')
+      record.timestamp[19] = '.';
+  }
+  record.stack_trace = continuation_text(continuation);
+  record.exception = has_exception_line(record.stack_trace) ||
+                     names_exception_type(record.message);
+  if (kind == SchedulerLine::spark_console)
+    enrich_spark_record(record);
+  else
+    enrich_flink_record(record);
+
+  // Only the scheduler decides the instance outcome; terminal states reported
+  // by the task remain failure evidence.
+  record.terminal_success = false;
+  record.terminal_failure = false;
+  record.service = "task";
+  record.endpoint = record.logger.empty() ? "task" : record.logger;
+  if (task_infrastructure_noise(record)) {
+    record.advisory = true;
+    record.failure = false;
+    record.exception = false;
+  }
+  ++decoded.scheduler.task_events[task_format];
+  record.attributes["task_format"] = std::move(task_format);
+  return true;
+}
+
 DecodedInput decode_framed(std::string_view content, std::size_t base_offset,
                            InputFormat format, const AnalyzeOptions& options,
                            const RecordConsumer& consume) {
@@ -861,6 +1242,20 @@ DecodedInput decode_framed(std::string_view content, std::size_t base_offset,
           emit(std::move(record));
         },
         decoded);
+  } else if (format == InputFormat::scheduler) {
+    for_each_event(
+        content, base_offset,
+        [](std::string_view line) {
+          return scheduler_line_kind(line) != SchedulerLine::none;
+        },
+        [&](const EventSpan& span) {
+          LogRecord record;
+          if (decode_scheduler_event(span, options, decoded, record))
+            emit(std::move(record));
+          else
+            ++decoded.malformed;
+        },
+        decoded);
   }
 
   decoded.reverse_order = emitted_records >= 2 &&
@@ -884,6 +1279,8 @@ std::string_view input_format_name(InputFormat format) {
       return "spark-syslog";
     case InputFormat::flink_console:
       return "flink-console";
+    case InputFormat::scheduler:
+      return "scheduler";
   }
   return "unknown";
 }
