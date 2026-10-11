@@ -1,4 +1,4 @@
-#include "logscope/output.h"
+#include "log_analyzer/output.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,9 +9,9 @@
 #include <tuple>
 #include <utility>
 
-#include "logscope/analyzer.h"
+#include "log_analyzer/analyzer.h"
 
-namespace logscope {
+namespace log_analyzer {
 namespace {
 
 template <typename Map>
@@ -533,4 +533,4 @@ void render_records(std::ostream&, const std::vector<LogRecord>&, OutputFormat, 
 void render_contexts(std::ostream&, const std::vector<std::vector<LogRecord>>&, OutputFormat,
                      std::string_view) {}
 
-}  // namespace logscope
+}  // namespace log_analyzer

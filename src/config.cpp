@@ -1,4 +1,4 @@
-#include "logscope/config.h"
+#include "log_analyzer/config.h"
 
 #include <algorithm>
 #include <cctype>
@@ -7,7 +7,7 @@
 #include <string_view>
 #include <unordered_map>
 
-namespace logscope {
+namespace log_analyzer {
 namespace {
 
 std::string trim(std::string value) {
@@ -66,4 +66,4 @@ std::string default_config_yaml() {
          "latency_ms: latency_ms\nmessage: message\nendpoint: endpoint\nstack_trace: stack_trace\n";
 }
 
-}  // namespace logscope
+}  // namespace log_analyzer

@@ -1,4 +1,4 @@
-#include "logscope/analyzer.h"
+#include "log_analyzer/analyzer.h"
 
 #include <algorithm>
 #include <array>
@@ -6,7 +6,7 @@
 #include <string>
 #include <string_view>
 
-namespace logscope {
+namespace log_analyzer {
 namespace {
 
 std::string root_cause_line(std::string_view message, std::string_view stack) {
@@ -192,4 +192,4 @@ Percentiles calculate_percentiles(std::vector<double> values) {
   return result;
 }
 
-}  // namespace logscope
+}  // namespace log_analyzer

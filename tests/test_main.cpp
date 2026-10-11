@@ -9,8 +9,8 @@
 #include <string_view>
 #include <vector>
 
-#include "logscope/analyzer.h"
-#include "logscope/output.h"
+#include "log_analyzer/analyzer.h"
+#include "log_analyzer/output.h"
 
 namespace {
 
@@ -30,7 +30,7 @@ std::filesystem::path fixture(std::string_view name) {
 }  // namespace
 
 int main() {
-  using namespace logscope;
+  using namespace log_analyzer;
 
   const auto normalized_a = normalize_error("query timeout after 1200 ms for order 9812");
   const auto normalized_b = normalize_error("query timeout after 1350 ms for order 10421");
@@ -53,7 +53,7 @@ int main() {
   expect(std::abs(percentiles.p50 - 30.0) < 0.001, "p50 interpolation");
   expect(std::abs(percentiles.p95 - 48.0) < 0.001, "p95 interpolation");
 
-  const auto path = std::filesystem::temp_directory_path() / "logscope-test.jsonl";
+  const auto path = std::filesystem::temp_directory_path() / "log-analyzer-test.jsonl";
   {
     std::ofstream file(path);
     file << R"({"timestamp":"2026-01-01T00:00:00Z","level":"INFO","service":"api","trace_id":"t1","endpoint":"GET /a","latency_ms":10,"message":"ok"})" << '\n';
@@ -186,7 +186,7 @@ int main() {
          "Flink summaries should omit empty endpoint latency");
 
   const auto padded_flink_path =
-      std::filesystem::temp_directory_path() / "logscope-padded-jobmanager.log";
+      std::filesystem::temp_directory_path() / "log-analyzer-padded-jobmanager.log";
   {
     std::ofstream file(padded_flink_path, std::ios::binary);
     file.write("\0\0\0\0", 4);
@@ -320,7 +320,7 @@ int main() {
     return path;
   };
   const auto embedded_path = write_scheduler_log(
-      "logscope-scheduler-embedded.log",
+      "log-analyzer-scheduler-embedded.log",
       "2026-06-01T10:00:00.000 INFO  Instance created with id 2001\n"
       "2026-06-01T10:00:01.000 INFO  Start to change instance status from "
       "EXECUTOR_PENDING to RUNNING.\n"
@@ -340,7 +340,7 @@ int main() {
   std::filesystem::remove(embedded_path);
 
   const auto running_path = write_scheduler_log(
-      "logscope-scheduler-running.log",
+      "log-analyzer-scheduler-running.log",
       "2026-06-02T09:00:00.000 INFO  Instance created with id 3001\n"
       "2026-06-02T09:00:01.000 INFO  Start to change instance status from "
       "EXECUTOR_PENDING to RUNNING.\n"
@@ -355,7 +355,7 @@ int main() {
   std::filesystem::remove(running_path);
 
   const auto retry_path = write_scheduler_log(
-      "logscope-scheduler-retry.log",
+      "log-analyzer-scheduler-retry.log",
       "2026-06-03T09:00:00.000 INFO  Instance created with id 4001\n"
       "2026-06-03T09:00:01.000 INFO  Start to change instance status from RUNNING "
       "to FAILED_RETRY.\n");
