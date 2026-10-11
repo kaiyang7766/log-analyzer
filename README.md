@@ -1,11 +1,11 @@
-# LogScope++
+# log-analyzer
 
-LogScope++ is a fast, local C++20 command-line log pre-analyzer designed
+log-analyzer is a fast, local C++20 command-line log pre-analyzer designed
 primarily for single-threaded execution. Its main purpose is to reduce large
 collections of raw logs into compact, structured incident summaries before
 those summaries are provided to an LLM for debugging.
 
-Instead of spending LLM context and upload time on entire log files, LogScope++
+Instead of spending LLM context and upload time on entire log files, log-analyzer
 scans each file locally, reconstructs multiline records, extracts workflow,
 Spark, and Flink lifecycle signals, groups failures, and produces text,
 Markdown, or JSON summaries. It is designed for high-throughput batch workflows
@@ -63,26 +63,26 @@ On Debian/Ubuntu, install `cmake`, `ninja-build`, `g++`, and
 ## Run
 
 ```bash
-./build/logscope analyze incident.txt
-./build/logscope analyze spark.syslog.html --timezone +08:00
-./build/logscope analyze jobmanager.out --timezone +08:00
-./build/logscope analyze scheduler-instance.log --timezone +08:00
-./build/logscope errors incident.txt --group-by service
-./build/logscope latency spark.syslog.html --group-by endpoint
-./build/logscope analyze incident.txt --text timeout --format markdown
-./build/logscope analyze incident.txt --format json
-./build/logscope analyze incident.txt --io mmap
+./build/log-analyzer analyze incident.txt
+./build/log-analyzer analyze spark.syslog.html --timezone +08:00
+./build/log-analyzer analyze jobmanager.out --timezone +08:00
+./build/log-analyzer analyze scheduler-instance.log --timezone +08:00
+./build/log-analyzer errors incident.txt --group-by service
+./build/log-analyzer latency spark.syslog.html --group-by endpoint
+./build/log-analyzer analyze incident.txt --text timeout --format markdown
+./build/log-analyzer analyze incident.txt --format json
+./build/log-analyzer analyze incident.txt --io mmap
 ```
 
 For large logs, use a Release build and consider `--io mmap` to avoid copying
 the input file into a userspace buffer.
 
-To pre-analyze a directory in bulk, invoke LogScope++ once per file and collect
+To pre-analyze a directory in bulk, invoke log-analyzer once per file and collect
 the compact summaries for an LLM harness:
 
 ```bash
 find /path/to/logs -type f \
-  -exec ./build/logscope analyze {} --format markdown --io mmap \; \
+  -exec ./build/log-analyzer analyze {} --format markdown --io mmap \; \
   > bulk-summary.md
 ```
 

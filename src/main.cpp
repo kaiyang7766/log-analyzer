@@ -6,17 +6,17 @@
 #include <string>
 #include <string_view>
 
-#include "logscope/analyzer.h"
-#include "logscope/output.h"
+#include "log_analyzer/analyzer.h"
+#include "log_analyzer/output.h"
 
 namespace {
 
-constexpr std::string_view usage = R"(LogScope++ 0.2.0
+constexpr std::string_view usage = R"(log-analyzer 0.2.0
 
 Usage:
-  logscope analyze FILE [FILTERS] [--format text|markdown|json]
-  logscope errors  FILE [FILTERS] [--group-by error|service|endpoint]
-  logscope latency FILE [FILTERS] [--group-by endpoint|service]
+  log-analyzer analyze FILE [FILTERS] [--format text|markdown|json]
+  log-analyzer errors  FILE [FILTERS] [--group-by error|service|endpoint]
+  log-analyzer latency FILE [FILTERS] [--group-by endpoint|service]
 
 Filters:
   --from TIMESTAMP       Include normalized timestamps >= this value
@@ -43,8 +43,8 @@ Notes:
 struct Cli {
   std::string command;
   std::filesystem::path file;
-  logscope::AnalyzeOptions analysis;
-  logscope::RenderOptions render;
+  log_analyzer::AnalyzeOptions analysis;
+  log_analyzer::RenderOptions render;
 };
 
 std::string require_value(int argc, char** argv, int& index, std::string_view option) {
@@ -60,14 +60,14 @@ std::size_t parse_size(std::string_view value, std::string_view option) {
   return parsed;
 }
 
-logscope::InputFormat parse_input_format(std::string_view value) {
-  if (value == "auto") return logscope::InputFormat::auto_detect;
-  if (value == "jsonl") return logscope::InputFormat::jsonl;
-  if (value == "app-export") return logscope::InputFormat::app_export;
-  if (value == "logback") return logscope::InputFormat::logback;
-  if (value == "spark-syslog") return logscope::InputFormat::spark_syslog;
-  if (value == "flink-console") return logscope::InputFormat::flink_console;
-  if (value == "scheduler") return logscope::InputFormat::scheduler;
+log_analyzer::InputFormat parse_input_format(std::string_view value) {
+  if (value == "auto") return log_analyzer::InputFormat::auto_detect;
+  if (value == "jsonl") return log_analyzer::InputFormat::jsonl;
+  if (value == "app-export") return log_analyzer::InputFormat::app_export;
+  if (value == "logback") return log_analyzer::InputFormat::logback;
+  if (value == "spark-syslog") return log_analyzer::InputFormat::spark_syslog;
+  if (value == "flink-console") return log_analyzer::InputFormat::flink_console;
+  if (value == "scheduler") return log_analyzer::InputFormat::scheduler;
   throw std::runtime_error(
       "--input-format must be auto, jsonl, app-export, logback, spark-syslog, "
       "flink-console, or scheduler");
@@ -79,7 +79,7 @@ Cli parse_cli(int argc, char** argv) {
     std::exit(0);
   }
   if (std::string_view(argv[1]) == "--version") {
-    std::cout << "logscope 0.2.0\n";
+    std::cout << "log-analyzer 0.2.0\n";
     std::exit(0);
   }
   if (argc < 3) throw std::runtime_error("a command and input file are required");
@@ -108,15 +108,15 @@ Cli parse_cli(int argc, char** argv) {
       cli.analysis.default_timezone = require_value(argc, argv, index, option);
     else if (option == "--io") {
       const auto value = require_value(argc, argv, index, option);
-      if (value == "buffered") cli.analysis.io_mode = logscope::IoMode::buffered;
-      else if (value == "mmap") cli.analysis.io_mode = logscope::IoMode::mmap;
+      if (value == "buffered") cli.analysis.io_mode = log_analyzer::IoMode::buffered;
+      else if (value == "mmap") cli.analysis.io_mode = log_analyzer::IoMode::mmap;
       else throw std::runtime_error("--io must be buffered or mmap");
     }
     else if (option == "--format") {
       const auto value = require_value(argc, argv, index, option);
-      if (value == "text") cli.render.format = logscope::OutputFormat::text;
-      else if (value == "markdown") cli.render.format = logscope::OutputFormat::markdown;
-      else if (value == "json") cli.render.format = logscope::OutputFormat::json;
+      if (value == "text") cli.render.format = log_analyzer::OutputFormat::text;
+      else if (value == "markdown") cli.render.format = log_analyzer::OutputFormat::markdown;
+      else if (value == "json") cli.render.format = log_analyzer::OutputFormat::json;
       else throw std::runtime_error("--format must be text, markdown, or json");
     } else if (option == "--help" || option == "-h") {
       std::cout << usage;
@@ -140,13 +140,13 @@ Cli parse_cli(int argc, char** argv) {
 int main(int argc, char** argv) {
   try {
     const auto cli = parse_cli(argc, argv);
-    const auto result = logscope::analyze_file(cli.file, cli.analysis);
-    if (cli.command == "analyze") logscope::render_analysis(std::cout, result, cli.render);
-    else if (cli.command == "errors") logscope::render_errors(std::cout, result, cli.render);
-    else logscope::render_latency(std::cout, result, cli.render);
+    const auto result = log_analyzer::analyze_file(cli.file, cli.analysis);
+    if (cli.command == "analyze") log_analyzer::render_analysis(std::cout, result, cli.render);
+    else if (cli.command == "errors") log_analyzer::render_errors(std::cout, result, cli.render);
+    else log_analyzer::render_latency(std::cout, result, cli.render);
     return 0;
   } catch (const std::exception& error) {
-    std::cerr << "logscope: " << error.what() << "\nRun 'logscope --help' for usage.\n";
+    std::cerr << "log-analyzer: " << error.what() << "\nRun 'log-analyzer --help' for usage.\n";
     return 2;
   }
 }

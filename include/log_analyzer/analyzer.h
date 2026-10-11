@@ -5,9 +5,9 @@
 #include <string_view>
 #include <vector>
 
-#include "logscope/model.h"
+#include "log_analyzer/model.h"
 
-namespace logscope {
+namespace log_analyzer {
 
 AnalysisResult analyze_file(const std::filesystem::path& path, const AnalyzeOptions& options);
 std::string normalize_error(std::string_view message, std::string_view stack_trace = {});
@@ -18,4 +18,4 @@ std::vector<std::vector<LogRecord>> select_contexts(const AnalysisResult& result
                                                     std::size_t before,
                                                     std::size_t after);
 
-}  // namespace logscope
+}  // namespace log_analyzer

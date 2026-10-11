@@ -5,9 +5,9 @@
 #include <string_view>
 #include <vector>
 
-#include "logscope/model.h"
+#include "log_analyzer/model.h"
 
-namespace logscope {
+namespace log_analyzer {
 
 struct RenderOptions {
   OutputFormat format = OutputFormat::text;
@@ -23,4 +23,4 @@ void render_records(std::ostream& out, const std::vector<LogRecord>& records,
 void render_contexts(std::ostream& out, const std::vector<std::vector<LogRecord>>& contexts,
                      OutputFormat format, std::string_view needle);
 
-}  // namespace logscope
+}  // namespace log_analyzer

@@ -1,4 +1,4 @@
-#include "logscope/analyzer.h"
+#include "log_analyzer/analyzer.h"
 
 #include <algorithm>
 #include <chrono>
@@ -16,7 +16,7 @@
 #include "formats.h"
 #include "input.h"
 
-namespace logscope {
+namespace log_analyzer {
 namespace {
 
 struct Shard {
@@ -391,4 +391,4 @@ std::vector<std::vector<LogRecord>> select_contexts(
   return contexts;
 }
 
-}  // namespace logscope
+}  // namespace log_analyzer

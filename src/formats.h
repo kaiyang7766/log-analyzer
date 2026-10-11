@@ -6,9 +6,9 @@
 #include <string>
 #include <string_view>
 
-#include "logscope/model.h"
+#include "log_analyzer/model.h"
 
-namespace logscope::detail {
+namespace log_analyzer::detail {
 
 struct DecodedInput {
   InputFormat format = InputFormat::auto_detect;
@@ -28,4 +28,4 @@ DecodedInput decode_input(std::string_view input, const AnalyzeOptions& options,
                           const RecordConsumer& consume);
 std::string_view input_format_name(InputFormat format);
 
-}  // namespace logscope::detail
+}  // namespace log_analyzer::detail

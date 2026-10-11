@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-namespace logscope::detail {
+namespace log_analyzer::detail {
 namespace {
 
 struct ContainerView {
@@ -1295,4 +1295,4 @@ DecodedInput decode_input(std::string_view input, const AnalyzeOptions& options,
   return decoded;
 }
 
-}  // namespace logscope::detail
+}  // namespace log_analyzer::detail

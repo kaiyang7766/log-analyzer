@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace logscope {
+namespace log_analyzer {
 
 struct FieldConfig {
   std::string timestamp = "timestamp";
@@ -144,4 +144,4 @@ struct Percentiles {
   double max = 0.0;
 };
 
-}  // namespace logscope
+}  // namespace log_analyzer

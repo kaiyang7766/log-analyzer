@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(logscope VERSION 0.2.0 LANGUAGES CXX)
+project(log-analyzer VERSION 0.2.0 LANGUAGES CXX)
 
-option(LOGSCOPE_BUILD_TESTS "Build the test suite" ON)
-option(LOGSCOPE_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(LOG_ANALYZER_BUILD_TESTS "Build the test suite" ON)
+option(LOG_ANALYZER_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,46 +21,46 @@ if(NOT simdjson_FOUND)
   set_target_properties(simdjson_fallback PROPERTIES
     IMPORTED_LOCATION "${SIMDJSON_LIBRARY}"
     INTERFACE_INCLUDE_DIRECTORIES "${SIMDJSON_INCLUDE_DIR}")
-  set(LOGSCOPE_SIMDJSON_TARGET simdjson_fallback)
+  set(LOG_ANALYZER_SIMDJSON_TARGET simdjson_fallback)
 elseif(TARGET simdjson::simdjson)
-  set(LOGSCOPE_SIMDJSON_TARGET simdjson::simdjson)
+  set(LOG_ANALYZER_SIMDJSON_TARGET simdjson::simdjson)
 elseif(TARGET simdjson)
-  set(LOGSCOPE_SIMDJSON_TARGET simdjson)
+  set(LOG_ANALYZER_SIMDJSON_TARGET simdjson)
 else()
   message(FATAL_ERROR "The simdjson package was found but did not export a known target")
 endif()
 
-add_library(logscope_core
+add_library(log_analyzer_core
   src/analyzer.cpp
   src/config.cpp
   src/formats.cpp
   src/input.cpp
   src/normalize.cpp
   src/output.cpp)
-target_include_directories(logscope_core PUBLIC include)
-target_link_libraries(logscope_core PUBLIC ${LOGSCOPE_SIMDJSON_TARGET} Threads::Threads)
-target_compile_options(logscope_core PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(log_analyzer_core PUBLIC include)
+target_link_libraries(log_analyzer_core PUBLIC ${LOG_ANALYZER_SIMDJSON_TARGET} Threads::Threads)
+target_compile_options(log_analyzer_core PRIVATE -Wall -Wextra -Wpedantic)
 
-add_executable(logscope src/main.cpp)
-target_link_libraries(logscope PRIVATE logscope_core)
+add_executable(log-analyzer src/main.cpp)
+target_link_libraries(log-analyzer PRIVATE log_analyzer_core)
 
-if(LOGSCOPE_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-  foreach(target logscope_core logscope)
+if(LOG_ANALYZER_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  foreach(target log_analyzer_core log-analyzer)
     target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
     target_link_options(${target} PRIVATE -fsanitize=address,undefined)
   endforeach()
 endif()
 
 include(CTest)
-if(BUILD_TESTING AND LOGSCOPE_BUILD_TESTS)
-  add_executable(logscope_tests tests/test_main.cpp)
-  target_link_libraries(logscope_tests PRIVATE logscope_core)
-  target_compile_options(logscope_tests PRIVATE -Wall -Wextra -Wpedantic)
-  if(LOGSCOPE_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
-    target_compile_options(logscope_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(logscope_tests PRIVATE -fsanitize=address,undefined)
+if(BUILD_TESTING AND LOG_ANALYZER_BUILD_TESTS)
+  add_executable(log_analyzer_tests tests/test_main.cpp)
+  target_link_libraries(log_analyzer_tests PRIVATE log_analyzer_core)
+  target_compile_options(log_analyzer_tests PRIVATE -Wall -Wextra -Wpedantic)
+  if(LOG_ANALYZER_ENABLE_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(log_analyzer_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(log_analyzer_tests PRIVATE -fsanitize=address,undefined)
   endif()
-  add_test(NAME logscope_tests COMMAND logscope_tests)
+  add_test(NAME log_analyzer_tests COMMAND log_analyzer_tests)
 endif()
 
-install(TARGETS logscope RUNTIME DESTINATION bin)
+install(TARGETS log-analyzer RUNTIME DESTINATION bin)

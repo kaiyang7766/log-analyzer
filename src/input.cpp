@@ -13,7 +13,7 @@
 #include <unistd.h>
 #endif
 
-namespace logscope::detail {
+namespace log_analyzer::detail {
 
 InputBuffer::InputBuffer(const std::filesystem::path& path, IoMode mode) {
 #if defined(__unix__) || defined(__APPLE__)
@@ -65,4 +65,4 @@ InputBuffer::~InputBuffer() {
 #endif
 }
 
-}  // namespace logscope::detail
+}  // namespace log_analyzer::detail

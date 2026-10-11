@@ -4,9 +4,9 @@
 #include <filesystem>
 #include <string>
 
-#include "logscope/model.h"
+#include "log_analyzer/model.h"
 
-namespace logscope::detail {
+namespace log_analyzer::detail {
 
 class InputBuffer {
  public:
@@ -27,4 +27,4 @@ class InputBuffer {
   int fd_ = -1;
 };
 
-}  // namespace logscope::detail
+}  // namespace log_analyzer::detail
