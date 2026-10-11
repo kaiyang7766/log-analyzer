@@ -19,6 +19,7 @@ struct DecodedInput {
   std::uint64_t continuation_lines = 0;
   std::uint64_t malformed = 0;
   bool reverse_order = false;
+  SchedulerSummary scheduler;
 };
 
 using RecordConsumer = std::function<void(LogRecord&&)>;

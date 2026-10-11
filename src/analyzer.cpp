@@ -271,6 +271,40 @@ void merge_shard(AnalysisResult& result, Shard& shard) {
   }
 }
 
+// The scheduler's instance state is authoritative. Terminal evidence gains the
+// exit code and retry budget, and an instance that never reached a terminal
+// state is not reported as failed merely because failure events were seen.
+void annotate_scheduler_outcome(AnalysisResult& result, bool saw_terminal) {
+  const auto& scheduler = result.scheduler;
+  std::string details;
+  const auto append = [&](const std::string& text) {
+    if (!details.empty()) details += "; ";
+    details += text;
+  };
+  if (!scheduler.exit_code.empty()) append("exit code " + scheduler.exit_code);
+  if (scheduler.max_retries > 0 || scheduler.current_retry > 0) {
+    std::string retries = "retries used: " + std::to_string(scheduler.current_retry);
+    if (scheduler.max_retries > 0)
+      retries += " of " + std::to_string(scheduler.max_retries);
+    if (scheduler.retry_exhausted) retries += ", exhausted";
+    append(retries);
+  }
+  if (scheduler.last_state == "FAILED_RETRY") append("another retry is pending");
+
+  if (saw_terminal) {
+    if (!details.empty()) result.outcome_evidence += " (" + details + ")";
+  } else if (!scheduler.last_state.empty()) {
+    result.outcome = "unknown";
+    result.outcome_evidence = "No terminal status was found; instance status has been " +
+                              scheduler.last_state + " since " +
+                              scheduler.last_state_timestamp;
+    if (result.error_events > 0)
+      result.outcome_evidence +=
+          "; " + std::to_string(result.error_events) + " failure events so far";
+    result.outcome_evidence += '.';
+  }
+}
+
 }  // namespace
 
 AnalysisResult analyze_file(const std::filesystem::path& path,
@@ -305,11 +339,17 @@ AnalysisResult analyze_file(const std::filesystem::path& path,
   result.container_format = std::move(decoded.container_name);
 
   if (decoded.reverse_order) reverse_stat_halves(shard);
+  const bool saw_terminal =
+      shard.saw_terminal_success || shard.saw_terminal_failure;
   merge_shard(result, shard);
 
   if (result.outcome == "unknown" && result.matched > 0) {
     result.outcome_evidence =
         "No terminal success or failure marker was found.";
+  }
+  if (decoded.format == InputFormat::scheduler) {
+    result.scheduler = std::move(decoded.scheduler);
+    annotate_scheduler_outcome(result, saw_terminal);
   }
 
   std::stable_sort(result.records.begin(), result.records.end(),

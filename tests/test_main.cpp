@@ -7,6 +7,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "logscope/analyzer.h"
 #include "logscope/output.h"
@@ -217,6 +218,154 @@ int main() {
          "column-aligned Flink warning levels should be counted");
   std::filesystem::remove(padded_flink_path);
 
+  AnalyzeOptions scheduler_options;
+  scheduler_options.retain_records = true;
+  scheduler_options.default_timezone = "+08:00";
+  const auto scheduler_result =
+      analyze_file(fixture("scheduler_instance.log"), scheduler_options);
+  expect(scheduler_result.detected_format == "scheduler",
+         "scheduler instance logs should be auto-detected");
+  expect(scheduler_result.lines == 34 && scheduler_result.events == 22,
+         "scheduler and embedded task headers should both frame events");
+  expect(scheduler_result.continuations == 10 && scheduler_result.malformed == 0,
+         "task stdout and stack traces should be continuation lines");
+  expect(scheduler_result.outcome == "failed",
+         "a terminal scheduler failure should determine the outcome");
+  expect(scheduler_result.outcome_evidence ==
+             "Exit status:FAILED (exit code 1; retries used: 3 of 3, exhausted)",
+         "scheduler evidence should include exit code and retry budget");
+  expect(scheduler_result.error_events == 4,
+         "task failures, scheduler errors, and the failed transition should count once each");
+  expect(scheduler_result.warnings == 3 && scheduler_result.advisory_events == 3,
+         "agent noise and deprecations should be advisory warnings");
+  expect(scheduler_result.exception_events == 2,
+         "agent noise and metric names should not count as exceptions");
+  const auto pool_root_cause = std::find_if(
+      scheduler_result.exception_groups.begin(),
+      scheduler_result.exception_groups.end(), [](const auto& group) {
+        return group.first.find("poolexception: connection pool is empty") !=
+               std::string::npos;
+      });
+  expect(pool_root_cause != scheduler_result.exception_groups.end(),
+         "the task stack trace root cause should be grouped");
+  expect(scheduler_result.retries == 3 &&
+             scheduler_result.retry_operations.at("instance") == 4,
+         "scheduler retries should count completed retries");
+  expect(scheduler_result.failed_jobs == 1,
+         "task-reported job failures should remain lifecycle evidence");
+  const auto& scheduler = scheduler_result.scheduler;
+  expect(scheduler.instance_id == "1002", "the retried instance should be identified");
+  expect(scheduler.state_path ==
+             std::vector<std::string>{"SUBMITTED", "EXECUTOR_PENDING", "RUNNING",
+                                      "FAILED"},
+         "scheduler status transitions should form a path");
+  expect(scheduler.exit_code == "1" && scheduler.current_retry == 3 &&
+             scheduler.max_retries == 3 && scheduler.retry_exhausted,
+         "scheduler exit code and retry budget should be extracted");
+  expect(scheduler.unframed_task_lines == 2,
+         "stdout after lifecycle messages should not become their stack trace");
+  expect(scheduler.task_events.at("log4j") == 4 &&
+             scheduler.task_events.at("java-logging") == 1 &&
+             scheduler.task_events.at("spark-console") == 1,
+         "embedded task output formats should be counted");
+  const auto record_with = [&](std::string_view message) {
+    return std::find_if(scheduler_result.records.begin(),
+                        scheduler_result.records.end(),
+                        [&](const LogRecord& record) { return record.message == message; });
+  };
+  const auto java_logging = record_with("send msg in cache fail status:111");
+  expect(java_logging != scheduler_result.records.end() &&
+             java_logging->timestamp == "2026-05-15T00:51:46+08:00" &&
+             java_logging->severity == "WARN" &&
+             java_logging->logger == "org.example.shipping.Cache",
+         "two-line java.util.logging records should parse");
+  const auto replayed = record_with("Engine job [42], status [RUNNING]");
+  expect(replayed != scheduler_result.records.end() &&
+             replayed->timestamp == "2026-05-15T00:51:48.500+08:00" &&
+             replayed->attributes.contains("replayed"),
+         "replayed scheduler lines should keep their original header");
+  const auto client = record_with("Starting command line client");
+  expect(client != scheduler_result.records.end() &&
+             client->timestamp == "2026-05-15T00:51:46.001+08:00" &&
+             client->service == "task" &&
+             client->endpoint == "org.example.client.CliFrontend",
+         "Flink client lines without thread columns should parse as task output");
+  expect(scheduler_result.first_timestamp == "2026-05-15T00:46:42.806+08:00" &&
+             scheduler_result.last_timestamp == "2026-05-15T00:51:51.900+08:00",
+         "scheduler analysis should report its time range");
+  AnalyzeOptions scheduler_filtered;
+  scheduler_filtered.filters.level = "WARN";
+  const auto scheduler_filtered_result =
+      analyze_file(fixture("scheduler_instance.log"), scheduler_filtered);
+  expect(scheduler_filtered_result.outcome == "failed" &&
+             scheduler_filtered_result.scheduler.state_path.size() == 4,
+         "filters should not hide the scheduler outcome or status path");
+  std::ostringstream scheduler_text;
+  render_analysis(scheduler_text, scheduler_result, RenderOptions{});
+  expect(scheduler_text.str().find(
+             "Status path: SUBMITTED -> EXECUTOR_PENDING -> RUNNING -> FAILED") !=
+             std::string::npos,
+         "scheduler summaries should include the status path");
+  std::ostringstream scheduler_json;
+  RenderOptions scheduler_render;
+  scheduler_render.format = OutputFormat::json;
+  render_analysis(scheduler_json, scheduler_result, scheduler_render);
+  expect(scheduler_json.str().find("\"retry_exhausted\": true") != std::string::npos,
+         "scheduler JSON should include the retry budget");
+
+  const auto write_scheduler_log = [](std::string_view name, std::string_view content) {
+    const auto path = std::filesystem::temp_directory_path() / name;
+    std::ofstream file(path, std::ios::binary);
+    file << content;
+    return path;
+  };
+  const auto embedded_path = write_scheduler_log(
+      "logscope-scheduler-embedded.log",
+      "2026-06-01T10:00:00.000 INFO  Instance created with id 2001\n"
+      "2026-06-01T10:00:01.000 INFO  Start to change instance status from "
+      "EXECUTOR_PENDING to RUNNING.\n"
+      "26/06/01 10:00:02 WARN SparkConf: Example key is deprecated\n"
+      "26/06/01 10:00:03 INFO Client: Submitting application\n"
+      "26/06/01 10:00:04 INFO Client: Application report\n"
+      "2026-06-01 10:00:05,000 INFO  org.example.flink.Dispatcher - Job def456 "
+      "switched from state RUNNING to FAILED.\n"
+      "2026-06-01T10:00:06.000 INFO  execute status: SUCCEEDED\n"
+      "2026-06-01T10:00:06.100 INFO  Start to change instance status from RUNNING "
+      "to SUCCEEDED.\n");
+  const auto embedded_result = analyze_file(embedded_path, AnalyzeOptions{});
+  expect(embedded_result.detected_format == "scheduler",
+         "embedded Spark and Flink lines should not outvote scheduler headers");
+  expect(embedded_result.outcome == "succeeded" && embedded_result.failed_jobs == 1,
+         "task-reported terminal states should not override the scheduler");
+  std::filesystem::remove(embedded_path);
+
+  const auto running_path = write_scheduler_log(
+      "logscope-scheduler-running.log",
+      "2026-06-02T09:00:00.000 INFO  Instance created with id 3001\n"
+      "2026-06-02T09:00:01.000 INFO  Start to change instance status from "
+      "EXECUTOR_PENDING to RUNNING.\n"
+      "2026-06-02T09:00:02.000 ERROR Engine poll failed\n");
+  const auto running_result = analyze_file(running_path, AnalyzeOptions{});
+  expect(running_result.outcome == "unknown",
+         "a running instance should not fall back to a failed outcome");
+  expect(running_result.outcome_evidence ==
+             "No terminal status was found; instance status has been RUNNING since "
+             "2026-06-02T09:00:01.000; 1 failure events so far.",
+         "running instance evidence should name the last status");
+  std::filesystem::remove(running_path);
+
+  const auto retry_path = write_scheduler_log(
+      "logscope-scheduler-retry.log",
+      "2026-06-03T09:00:00.000 INFO  Instance created with id 4001\n"
+      "2026-06-03T09:00:01.000 INFO  Start to change instance status from RUNNING "
+      "to FAILED_RETRY.\n");
+  const auto retry_result = analyze_file(retry_path, AnalyzeOptions{});
+  expect(retry_result.outcome == "failed" &&
+             retry_result.outcome_evidence.find("another retry is pending") !=
+                 std::string::npos,
+         "FAILED_RETRY should fail the attempt and note the pending retry");
+  std::filesystem::remove(retry_path);
+
   std::ostringstream json;
   RenderOptions render;
   render.format = OutputFormat::json;
@@ -225,6 +374,8 @@ int main() {
          "JSON output should contain the scanned file name");
   expect(json.str().find("\"outcome\": \"succeeded\"") != std::string::npos,
          "JSON output should contain the resolved outcome");
+  expect(json.str().find("\"scheduler\"") == std::string::npos,
+         "JSON output should include scheduler fields only for scheduler logs");
 
   if (failures == 0) std::cout << "All tests passed\n";
   return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
