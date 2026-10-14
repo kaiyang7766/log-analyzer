@@ -4,3 +4,5 @@
 /cmake-build-*/
 .DS_Store
 /*Resume*.docx
+/logs/
+/isolated_logs/
