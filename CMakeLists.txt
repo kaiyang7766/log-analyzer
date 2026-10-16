@@ -32,7 +32,6 @@ endif()
 
 add_library(log_analyzer_core
   src/analyzer.cpp
-  src/config.cpp
   src/formats.cpp
   src/input.cpp
   src/normalize.cpp
