@@ -82,7 +82,7 @@ std::string compact_evidence(std::string value, std::size_t limit = 240) {
 }
 
 void consume_record(Shard& shard, LogRecord record,
-                    const AnalyzeOptions& options, std::size_t input_size) {
+                    const AnalyzeOptions& options, std::size_t midpoint) {
   if (record.failure) shard.saw_failure_evidence = true;
   if (record.terminal_success) {
     shard.saw_terminal_success = true;
@@ -126,7 +126,7 @@ void consume_record(Shard& shard, LogRecord record,
     ++shard.exception_events;
     auto& stats = shard.exception_groups[normalized_record()];
     ++stats.total;
-    const bool in_later_half = record.offset >= input_size / 2;
+    const bool in_later_half = record.offset >= midpoint;
     if (in_later_half)
       ++stats.recent;
     else
@@ -177,7 +177,7 @@ void consume_record(Shard& shard, LogRecord record,
   if (record.failure) {
     auto& stats = shard.errors[normalized_record()];
     ++stats.total;
-    const bool in_later_half = record.offset >= input_size / 2;
+    const bool in_later_half = record.offset >= midpoint;
     if (in_later_half)
       ++stats.recent;
     else
@@ -317,9 +317,15 @@ AnalysisResult analyze_file(const std::filesystem::path& path,
   result.bytes = input.size();
   if (input.size() == 0) return result;
 
+  // Halves are split within the log content so container padding or wrapper
+  // markup does not push every record into the same half.
+  const auto container =
+      detail::unwrap_container(std::string_view(input.data(), input.size()));
+  const auto midpoint = container.base_offset + container.content.size() / 2;
+
   Shard shard;
   auto decoded = detail::decode_input(
-      std::string_view(input.data(), input.size()), options,
+      container, options,
       [&](LogRecord&& record) {
         if (!record.timestamp.empty()) {
           if (result.first_timestamp.empty() ||
@@ -329,7 +335,7 @@ AnalysisResult analyze_file(const std::filesystem::path& path,
               record.timestamp > result.last_timestamp)
             result.last_timestamp = record.timestamp;
         }
-        consume_record(shard, std::move(record), options, input.size());
+        consume_record(shard, std::move(record), options, midpoint);
       });
   result.lines = decoded.physical_lines;
   result.events = decoded.logical_events;

@@ -10,6 +10,14 @@
 
 namespace log_analyzer::detail {
 
+// The log content inside a container (NUL padding, HTML <xmp>), with the
+// offset of its first byte in the original input.
+struct ContainerView {
+  std::string_view content;
+  std::size_t base_offset = 0;
+  std::string name = "plain-text";
+};
+
 struct DecodedInput {
   InputFormat format = InputFormat::auto_detect;
   std::string format_name;
@@ -24,7 +32,9 @@ struct DecodedInput {
 
 using RecordConsumer = std::function<void(LogRecord&&)>;
 
-DecodedInput decode_input(std::string_view input, const AnalyzeOptions& options,
+ContainerView unwrap_container(std::string_view input);
+DecodedInput decode_input(const ContainerView& container,
+                          const AnalyzeOptions& options,
                           const RecordConsumer& consume);
 std::string_view input_format_name(InputFormat format);
 

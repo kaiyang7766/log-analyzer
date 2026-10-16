@@ -18,12 +18,6 @@
 namespace log_analyzer::detail {
 namespace {
 
-struct ContainerView {
-  std::string_view content;
-  std::size_t base_offset = 0;
-  std::string name = "plain-text";
-};
-
 struct EventSpan {
   std::size_t offset = 0;
   std::string_view header;
@@ -179,6 +173,21 @@ bool has_exception_line(std::string_view value) {
   return false;
 }
 
+// Case-sensitive so prose such as "will throw an exception" is not mistaken
+// for a logged exception type.
+bool names_exception_type(std::string_view message) {
+  constexpr std::string_view type_suffix = "Exception";
+  for (auto position = message.find(type_suffix);
+       position != std::string_view::npos;
+       position = message.find(type_suffix, position + 1)) {
+    const auto end = position + type_suffix.size();
+    if (end == message.size() ||
+        !std::isalnum(static_cast<unsigned char>(message[end])))
+      return true;
+  }
+  return false;
+}
+
 std::string normalize_app_timestamp(std::string_view date, std::string_view time) {
   if (date.size() != 10) return std::string(date) + " " + std::string(time);
   return std::string(date) + "T" + std::string(time);
@@ -206,25 +215,6 @@ std::string normalize_short_year_timestamp(std::string_view value,
   result.append(value.substr(9));
   result.append(default_timezone);
   return result;
-}
-
-ContainerView unwrap_container(std::string_view input) {
-  const auto xmp = input.find("<xmp");
-  if (xmp == std::string_view::npos) {
-    const auto content_start = input.find_first_not_of('\0');
-    if (content_start == std::string_view::npos)
-      return {{}, input.size(), "nul-padded-text"};
-    if (content_start > 0)
-      return {input.substr(content_start), content_start, "nul-padded-text"};
-    return {input, 0, "plain-text"};
-  }
-  const auto start_tag_end = input.find('>', xmp);
-  const auto end = input.find("</xmp>", start_tag_end);
-  if (start_tag_end == std::string_view::npos || end == std::string_view::npos ||
-      end < start_tag_end)
-    throw std::runtime_error("invalid HTML log wrapper: unterminated xmp element");
-  const auto start = start_tag_end + 1;
-  return {input.substr(start, end - start), start, "html-xmp"};
 }
 
 bool looks_like_app_header(std::string_view line) {
@@ -644,7 +634,7 @@ void decode_jsonl(std::string_view content, std::size_t base_offset,
         record.latency_ms = number_field(object, options.fields.latency_ms);
         const auto level = lower(record.severity);
         record.exception = has_exception_line(record.stack_trace) ||
-                           contains_case_insensitive(record.message, "exception");
+                           names_exception_type(record.message);
         record.failure = level == "error" || level == "fatal" || level == "critical" ||
                          !record.stack_trace.empty() || message_looks_failed(record.message);
         record.event_kind = record.failure ? "failure" : "log";
@@ -772,7 +762,7 @@ bool decode_application_event(const EventSpan& event, InputFormat format,
   record.message = std::string(trim_view(inner.substr(cursor)));
   record.stack_trace = continuation_text(event.continuation);
   record.exception = has_exception_line(record.stack_trace) ||
-                     contains_case_insensitive(record.message, "exception");
+                     names_exception_type(record.message);
 
   const auto level = lower(record.severity);
   record.failure = level == "error" || level == "fatal" || level == "critical";
@@ -1061,19 +1051,6 @@ bool task_infrastructure_noise(const LogRecord& record) {
 
 // Java exception types are CamelCase, so words such as "exceptional" and
 // metric names such as "client.exception" do not mark an exception.
-bool names_exception_type(std::string_view message) {
-  constexpr std::string_view type_suffix = "Exception";
-  for (auto position = message.find(type_suffix);
-       position != std::string_view::npos;
-       position = message.find(type_suffix, position + 1)) {
-    const auto end = position + type_suffix.size();
-    if (end == message.size() ||
-        !std::isalnum(static_cast<unsigned char>(message[end])))
-      return true;
-  }
-  return false;
-}
-
 std::uint64_t count_nonblank_lines(std::string_view text) {
   std::uint64_t count = 0;
   std::size_t cursor = 0;
@@ -1237,7 +1214,7 @@ DecodedInput decode_framed(std::string_view content, std::size_t base_offset,
           record.stack_trace = continuation_text(span.continuation);
           record.exception =
               has_exception_line(record.stack_trace) ||
-              contains_case_insensitive(record.message, "exception");
+              names_exception_type(record.message);
           enrich_flink_record(record);
           emit(std::move(record));
         },
@@ -1285,9 +1262,28 @@ std::string_view input_format_name(InputFormat format) {
   return "unknown";
 }
 
-DecodedInput decode_input(std::string_view input, const AnalyzeOptions& options,
+ContainerView unwrap_container(std::string_view input) {
+  const auto xmp = input.find("<xmp");
+  if (xmp == std::string_view::npos) {
+    const auto content_start = input.find_first_not_of('\0');
+    if (content_start == std::string_view::npos)
+      return {{}, input.size(), "nul-padded-text"};
+    if (content_start > 0)
+      return {input.substr(content_start), content_start, "nul-padded-text"};
+    return {input, 0, "plain-text"};
+  }
+  const auto start_tag_end = input.find('>', xmp);
+  const auto end = input.find("</xmp>", start_tag_end);
+  if (start_tag_end == std::string_view::npos || end == std::string_view::npos ||
+      end < start_tag_end)
+    throw std::runtime_error("invalid HTML log wrapper: unterminated xmp element");
+  const auto start = start_tag_end + 1;
+  return {input.substr(start, end - start), start, "html-xmp"};
+}
+
+DecodedInput decode_input(const ContainerView& container,
+                          const AnalyzeOptions& options,
                           const RecordConsumer& consume) {
-  const auto container = unwrap_container(input);
   const auto format = detect_format(container.content, options.input_format);
   auto decoded = decode_framed(container.content, container.base_offset, format,
                                options, consume);

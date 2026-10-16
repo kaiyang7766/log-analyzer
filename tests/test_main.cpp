@@ -218,6 +218,38 @@ int main() {
          "column-aligned Flink warning levels should be counted");
   std::filesystem::remove(padded_flink_path);
 
+  const auto padded_halves_path =
+      std::filesystem::temp_directory_path() / "log-analyzer-padded-halves.log";
+  {
+    std::ofstream file(padded_halves_path, std::ios::binary);
+    file << std::string(4096, '\0');
+    file << "2026-07-21 02:51:41,101 ERROR com.example.Sink"
+            "     worker-1     [] - Sink write failed\n";
+    for (int i = 0; i < 4; ++i)
+      file << "2026-07-21 02:51:42,202 INFO  com.example.Sink"
+              "     worker-1     [] - Checkpoint completed\n";
+    file << "2026-07-21 02:51:43,303 WARN  com.example.HadoopRecoverableWriter"
+            "     jobmanager-future-thread-3     [] - WARNING: the"
+            " StreamingFileSink will throw an exception upon recovery.\n";
+    file << "2026-07-21 02:51:44,404 WARN  com.example.Client"
+            "     worker-1     [] - java.io.IOException: storage unavailable\n";
+  }
+  const auto padded_halves_result =
+      analyze_file(padded_halves_path, AnalyzeOptions{});
+  expect(padded_halves_result.errors.size() == 1 &&
+             padded_halves_result.errors.begin()->second.previous == 1 &&
+             padded_halves_result.errors.begin()->second.recent == 0,
+         "padding larger than the content should not shift records into the recent half");
+  expect(padded_halves_result.warnings == 2,
+         "both Flink warnings should be counted");
+  expect(padded_halves_result.exception_events == 1,
+         "prose mentioning an exception should not count as an exception event");
+  expect(padded_halves_result.exception_groups.size() == 1 &&
+             padded_halves_result.exception_groups.begin()->first.find(
+                 "java.io.ioexception") != std::string::npos,
+         "a logged exception type in the message should still count");
+  std::filesystem::remove(padded_halves_path);
+
   AnalyzeOptions scheduler_options;
   scheduler_options.retain_records = true;
   scheduler_options.default_timezone = "+08:00";
