@@ -1,264 +1,64 @@
 # log-analyzer
 
-log-analyzer is a fast, local C++20 command-line log pre-analyzer designed
-primarily for single-threaded execution. Its main purpose is to reduce large
-collections of raw logs into compact, structured incident summaries before
-those summaries are provided to an LLM for debugging.
+log-analyzer is a fast, single-threaded C++20 command-line tool. It reduces a
+large raw log file to a compact incident summary, so you can give that summary
+to an LLM instead of the whole log. Each invocation analyzes one file.
 
-Instead of spending LLM context and upload time on entire log files, log-analyzer
-scans each file locally, reconstructs multiline records, extracts workflow,
-Spark, and Flink lifecycle signals, groups failures, and produces text,
-Markdown, or JSON summaries. It is designed for high-throughput batch workflows
-where many large files are analyzed independently, with one file processed per
-invocation.
+**Input:** one log file. The format is detected automatically: JSONL,
+application exports, Logback, Spark/YARN syslog (including browser-saved HTML
+`<xmp>` pages), Flink JobManager logs (including NUL-padded ones), and
+scheduler instance logs. If detection is ambiguous, use `--input-format`.
+Multiline stack traces are attached to the event that logged them.
 
-The CLI can be called directly by a developer or exposed as a local tool to an
-LLM harness with shell-command capabilities. The harness can run an initial
-summary, inspect the compact result, and issue focused follow-up commands with
-filters or the `errors` and `latency` views without sending the raw log to the
-model.
+**Output:** a text, Markdown, or JSON summary. It covers the time range, the
+resolved outcome (succeeded, failed, or unknown) with supporting evidence,
+event counts, failure, exception, and warning groups, Spark/Flink lifecycle
+totals, retries, and latency percentiles. The `errors` and `latency` views and
+filters (`--from`, `--to`, `--level`, `--service`, `--trace-id`, `--text`,
+`--limit`) narrow the summary for follow-up questions.
 
-## Supported Inputs
-
-Auto detection currently recognizes:
-
-- JSONL objects using the built-in field mapping
-- enriched application exports with an outer metadata envelope and `_msg=`
-- raw Logback-style application logs
-- raw Spark/YARN syslog
-- Flink JobManager console logs such as `jobmanager.out`
-- NUL-padded Flink `jobmanager.log` files with full-year, column-aligned timestamps
-- browser-saved Spark syslog wrapped in an HTML `<xmp>` element
-- scheduler instance logs with ISO `T` timestamps that embed the task's own
-  output: Flink client log4j lines, Spark console lines, two-line
-  `java.util.logging` records, and plain stdout
-
-Use `--input-format` when automatic detection is ambiguous:
-
-```bash
---input-format auto|jsonl|app-export|logback|spark-syslog|flink-console|scheduler
-```
-
-Multiline stack traces and diagnostic blocks are attached to the preceding
-event. Blank lines are not treated as record boundaries. Leading NUL padding is
-skipped through a view into the original input rather than by copying the
-remaining payload.
-
-## Build
+## Build and run
 
 Requirements: CMake 3.20+, Ninja, a C++20 compiler, and simdjson.
 
 ```bash
-# macOS
-brew install cmake ninja simdjson
-
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-ctest --test-dir build --output-on-failure
+cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-release
+./build-release/log-analyzer analyze jobmanager.log --io mmap --format markdown
 ```
 
-On Debian/Ubuntu, install `cmake`, `ninja-build`, `g++`, and
-`libsimdjson-dev`.
+## Performance
 
-## Run
+Measured on an Apple Silicon Mac (macOS 26.3, arm64) with a Release build.
+Each configuration got 5 warm-up runs and 50 timed runs, interleaved in
+shuffled order. Times are end-to-end process wall time with stdout sent to
+`/dev/null`. Output was checked to be deterministic before timing.
+
+| Log | Size | I/O | p50 | p95 | CPU p50 | Peak RSS | Throughput |
+|---|---:|---|---:|---:|---:|---:|---:|
+| jobmanager.log (Flink) | 95.8 MB | mmap | **95.3 ms** | 97.5 ms | 94.5 ms | 94 MB | **1006 MB/s** |
+| jobmanager.log (Flink) | 95.8 MB | buffered | 111.8 ms | 126.4 ms | 110.0 ms | 94 MB | 857 MB/s |
+| spark_submit_a.log | 1.03 MB | mmap | 7.06 ms | 7.57 ms | 6.3 ms | 4.5 MB | 147 MB/s |
+| spark_submit_a.log | 1.03 MB | buffered | 7.31 ms | 7.79 ms | 6.5 ms | 4.8 MB | 141 MB/s |
+| spark_submit_b.log (spark-syslog) | 17 KB | mmap | 2.12 ms | 2.68 ms | 1.4 ms | 1.5 MB | — |
+| spark_submit_b.log (spark-syslog) | 17 KB | buffered | 2.18 ms | 2.64 ms | 1.5 ms | 1.5 MB | — |
+| `/usr/bin/true` (process spawn baseline) | — | — | 1.53 ms | 2.23 ms | 0.9 ms | 1.1 MB | — |
+
+- On large files, `--io mmap` is about 15% faster at p50 and much steadier at
+  p95. Most of the gain is lower system CPU time (4.0 ms vs 15.5 ms), because
+  mmap skips the whole-file copy.
+- At about 1 GB/s, nearly all large-file time is spent parsing in user space.
+- On small files, process startup dominates. The 17 KB log takes about 0.6 ms
+  more than an empty process.
+- Peak RSS is about equal to the file size on large inputs, in both I/O modes.
+
+Raw samples: [`bench/results/isolated_logs_20261011_230330.json`](bench/results/isolated_logs_20261011_230330.json)
+(2026-10-11). To reproduce:
 
 ```bash
-./build/log-analyzer analyze incident.txt
-./build/log-analyzer analyze spark.syslog.html --timezone +08:00
-./build/log-analyzer analyze jobmanager.out --timezone +08:00
-./build/log-analyzer analyze scheduler-instance.log --timezone +08:00
-./build/log-analyzer errors incident.txt --group-by service
-./build/log-analyzer latency spark.syslog.html --group-by endpoint
-./build/log-analyzer analyze incident.txt --text timeout --format markdown
-./build/log-analyzer analyze incident.txt --format json
-./build/log-analyzer analyze incident.txt --io mmap
+python3 bench/run_bench.py --runs 50 --warmup 5 \
+  --json bench/results/<name>.json \
+  isolated_logs/spark_submit_b.log:spark-syslog \
+  isolated_logs/spark_submit_a.log \
+  isolated_logs/jobmanager.log
 ```
-
-For large logs, use a Release build and consider `--io mmap` to avoid copying
-the input file into a userspace buffer.
-
-To pre-analyze a directory in bulk, invoke log-analyzer once per file and collect
-the compact summaries for an LLM harness:
-
-```bash
-find /path/to/logs -type f \
-  -exec ./build/log-analyzer analyze {} --format markdown --io mmap \; \
-  > bulk-summary.md
-```
-
-This keeps the analyzer itself deterministic and single-threaded while allowing
-the surrounding batch workflow to control file selection, output organization,
-and concurrency.
-
-Common filters and output controls:
-
-```text
---from TIMESTAMP
---to TIMESTAMP
---level LEVEL
---service SERVICE
---trace-id ID
---text TEXT
---limit COUNT
-```
-
-`--limit` caps grouped output rows; it does not change which records are
-analyzed.
-
-Spark, Flink, and scheduler timestamps have no timezone in the source format.
-`--timezone +08:00` appends an explicit offset after normalization. If omitted,
-timestamps remain timezone-unspecified.
-
-## Parsing Architecture
-
-The parser is split into these stages:
-
-1. Container decoding selects the relevant view from plain, NUL-padded, or
-   HTML/XMP-wrapped input.
-2. Content scoring selects JSONL, application-export, Logback, Spark, Flink, or
-   scheduler framing. Scheduler headers win over Spark and Flink lines because
-   scheduler logs embed the task's own Spark or Flink output.
-3. Format-specific framers stream complete logical event views to their decoder.
-4. Decoders map source headers into a shared `LogRecord`.
-5. Semantic enrichers classify workflow attempts, retries, state transitions,
-   HTTP/SQL activity, Spark application/job/stage/task lifecycle events, and Flink
-   terminal job states.
-6. The analyzer immediately filters and aggregates each canonical record.
-7. Renderers produce text, Markdown, or JSON.
-
-The source buffer owns all input bytes while decoding. Normal CLI analysis does
-not retain a vector of every parsed record; it keeps aggregate counts, grouped
-fingerprints, representative messages, and latency samples. Buffered and
-memory-mapped input therefore have identical results, while `mmap` avoids the
-initial whole-file copy.
-
-## Outcome Semantics
-
-Severity and incident outcome are deliberately separate:
-
-- `WARN` and an exception do not necessarily mean a Spark application failed.
-- Terminal workflow state or Spark/Flink application status has highest precedence.
-- Failed jobs, stages, and tasks are stronger evidence than message keywords.
-- Advisory warnings remain counted but do not become failure groups.
-- When no terminal marker exists, failure events produce a conservative failed
-  outcome with explicit fallback evidence.
-
-This prevents a successful Spark application with noisy startup warnings from
-being summarized as a failed incident.
-
-For scheduler logs, only the scheduler's instance status is terminal. A Flink
-job reported as `FAILED` inside the task output counts as a failed job and a
-failure event, but cannot override an instance that the scheduler reports as
-`SUCCEEDED`. `FAILED_RETRY` resolves to `failed` with evidence that another
-retry is pending. An instance whose last status is non-terminal, such as
-`RUNNING`, stays `unknown` even when failure events are present, and the
-evidence names that status.
-
-## Extracted Signals
-
-Application exports:
-
-- trace/log ID
-- flow and task-instance IDs
-- workflow and step names/IDs
-- retry round and persisted state
-- multiline exceptions
-- HTTP response latency and status
-- SQL message family
-
-Spark syslog:
-
-- application ID and terminal status
-- job, stage, task, and executor identifiers
-- completed and failed lifecycle counts
-- warning and advisory counts
-- incidental exceptions
-- selected elapsed-time metrics
-
-Flink console logs:
-
-- normalized time range and logger activity
-- grouped Java exception root causes
-- failover retry counts and warning patterns
-- retry-exhaustion failure evidence when no explicit terminal marker exists
-- terminal job states when present
-
-Scheduler instance logs:
-
-- instance ID, status path, exit code, and retries used against the maximum
-- terminal status from status transitions and `execute`/`Shutdown`/`Exit`
-  status lines
-- scheduler errors and exceptions, including their stack traces
-- task output framed by its own headers, so stack traces attach to the task
-  event that logged them rather than to the preceding lifecycle message
-- plain task stdout counted as unframed lines, not attached as stack traces
-- lines re-fetched from the job manager, with their original header restored
-- known agent noise (metrics-agent and log-shipping connection failures)
-  classified as advisory: counted as warnings, not as failures or exceptions
-
-## Output
-
-`analyze` includes:
-
-- detected input and container formats
-- first and last normalized timestamps
-- resolved outcome and supporting evidence
-- physical-line and logical-event counts
-- malformed and continuation counts
-- failures, warnings, exceptions, advisories, and retries
-- Spark and Flink execution lifecycle totals when present
-- normalized failure, exception, and warning groups
-- service/endpoint counts and latency percentiles in text and Markdown output
-- logger activity and retry operations for Flink input
-- instance status path, exit code, retries, and task-output breakdown for
-  scheduler input
-
-Markdown table cells are escaped, and JSON output is valid structured data rather
-than a text report wrapped in JSON. Use `--limit` to bound the number of rows in
-grouped output.
-
-## Tests
-
-The test suite includes sanitized fixtures modeled on:
-
-- a reverse-ordered application export with repeated workflow failure and a
-  terminal failed state
-- a successful Spark/YARN HTML syslog with warnings, an incidental exception,
-  completed job/stage/task events, and a thread name containing spaces
-- a Flink `jobmanager.out` file with multiline exceptions, retries, warnings,
-  and terminal job states
-- a generated NUL-padded, full-year `jobmanager.log` variant with aligned logger
-  and thread columns
-- a failed scheduler instance with retries, replayed lines, embedded Flink
-  client, Spark console, and `java.util.logging` output, agent noise, and a
-  multiline task root cause
-- generated scheduler variants covering embedded output that would otherwise
-  be detected as Flink, a still-running instance, and `FAILED_RETRY`
-
-No workplace hosts, users, service names, IDs, URLs, payloads, or internal code
-are included in the fixtures.
-
-## Current Boundaries
-
-Implemented parsing is single-process and single-threaded. Each CLI invocation
-accepts one file. Cross-file batching and any desired process-level concurrency
-belong to the caller or LLM harness.
-
-The parser aggregates records as they are decoded, but exact latency percentiles
-still retain their numeric samples. Semantic fields, grouping keys, and
-representative messages are owned strings.
-
-The following remain separate milestones:
-
-- cross-file correlation and incident graphs
-- generic profile-defined extractors and arbitrary `--where field=value` queries
-- request/response pairing across interleaved threads
-- exact time-window baselines instead of chronological file halves
-- bounded-memory approximate quantiles
-- parallel boundary scanning and decoder shards
-- configurable redaction policies
-- trace and context CLI rendering
-- benchmark and sanitizer automation
-
-Correct framing and outcome resolution are treated as prerequisites for those
-performance and correlation features.
