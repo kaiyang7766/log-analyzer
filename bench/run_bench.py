@@ -10,8 +10,12 @@ Per run, os.wait4 gives wall time plus the child's own user/sys CPU and peak
 RSS. stdout goes to /dev/null so terminal rendering is not measured. Every run
 must exit 0, and output is checked once for determinism before timing.
 
+Pass --binary several times as NAME=PATH to compare builds in one session.
+Their runs are interleaved like any other configurations, so the comparison
+is not skewed by drift between separate sessions.
+
 Usage:
-  python3 bench/run_bench.py [--runs 50] [--warmup 5] [--binary PATH]
+  python3 bench/run_bench.py [--runs 50] [--warmup 5] [--binary [NAME=]PATH ...]
                              [--json OUT] FILE[:input-format] ...
 """
 
@@ -75,7 +79,8 @@ def summarize(values):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("files", nargs="+", help="log file, optionally suffixed with :input-format")
-    parser.add_argument("--binary", default="build-release/log-analyzer")
+    parser.add_argument("--binary", action="append",
+                        help="[NAME=]PATH; repeat to compare builds (default build-release/log-analyzer)")
     parser.add_argument("--runs", type=int, default=50)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--io", default="buffered,mmap", help="comma-separated io modes")
@@ -83,18 +88,27 @@ def main():
     parser.add_argument("--json", help="write raw samples and summaries here")
     args = parser.parse_args()
 
+    binaries = []
+    for spec in args.binary or ["build-release/log-analyzer"]:
+        name, sep, path = spec.partition("=")
+        binaries.append((name, path) if sep else (None, spec))
+
     configs = []
     for spec in args.files:
         path, _, fmt = spec.partition(":")
         for io in args.io.split(","):
-            argv = [args.binary, "analyze", path, "--io", io]
-            if fmt:
-                argv += ["--input-format", fmt]
-            configs.append({
-                "name": f"{os.path.basename(path)} [{io}]", "file": path, "io": io,
-                "input_format": fmt or "auto", "size_bytes": os.path.getsize(path),
-                "argv": argv, "samples": [],
-            })
+            for label, binary in binaries:
+                argv = [binary, "analyze", path, "--io", io]
+                if fmt:
+                    argv += ["--input-format", fmt]
+                name = f"{os.path.basename(path)} [{io}]"
+                if len(binaries) > 1:
+                    name += f" {label or binary}"
+                configs.append({
+                    "name": name, "binary": binary, "file": path, "io": io,
+                    "input_format": fmt or "auto", "size_bytes": os.path.getsize(path),
+                    "argv": argv, "samples": [],
+                })
     baseline = {"name": "spawn baseline (/usr/bin/true)", "argv": ["/usr/bin/true"], "samples": []}
 
     # Determinism: identical output across repeated runs of each configuration.
@@ -105,7 +119,7 @@ def main():
             sys.exit(f"non-deterministic output for {c['name']}")
         c["output_sha256"] = digests.pop()
 
-    print(f"binary: {args.binary}\nruns: {args.runs} timed + {args.warmup} warm-up per config, interleaved\n")
+    print(f"binaries: {', '.join(b for _, b in binaries)}\nruns: {args.runs} timed + {args.warmup} warm-up per config, interleaved\n")
     for c in configs + [baseline]:
         for _ in range(args.warmup):
             run_once(c["argv"])
@@ -125,7 +139,7 @@ def main():
             mb = c["size_bytes"] / 1e6
             c["summary"]["throughput_mb_s_at_p50"] = mb / (c["summary"]["wall_ms"]["p50"] / 1e3)
 
-    header = f"{'config':<48} {'size':>9} {'p50 ms':>9} {'p95 ms':>9} {'p99 ms':>9} {'min':>8} {'max':>8} {'CV%':>5} {'cpu p50':>8} {'RSS MB':>7} {'MB/s':>7}"
+    header = f"{'config':<56} {'size':>9} {'p50 ms':>9} {'p95 ms':>9} {'p99 ms':>9} {'min':>8} {'max':>8} {'CV%':>5} {'cpu p50':>8} {'RSS MB':>7} {'MB/s':>7}"
     print(header)
     print("-" * len(header))
     for c in configs + [baseline]:
@@ -134,12 +148,12 @@ def main():
         rss = c["summary"]["rss_mb"]["p50"]
         size = f"{c['size_bytes'] / 1e6:.2f}MB" if "size_bytes" in c else "-"
         tput = f"{c['summary']['throughput_mb_s_at_p50']:.0f}" if "size_bytes" in c else "-"
-        print(f"{c['name']:<48} {size:>9} {w['p50']:>9.2f} {w['p95']:>9.2f} {w['p99']:>9.2f} {w['min']:>8.2f} "
+        print(f"{c['name']:<56} {size:>9} {w['p50']:>9.2f} {w['p95']:>9.2f} {w['p99']:>9.2f} {w['min']:>8.2f} "
               f"{w['max']:>8.2f} {w['cv_pct']:>5.1f} {cpu:>8.1f} {rss:>7.1f} {tput:>7}")
 
     if args.json:
         meta = {
-            "binary": args.binary, "runs": args.runs, "warmup": args.warmup, "seed": args.seed,
+            "binaries": [b for _, b in binaries], "runs": args.runs, "warmup": args.warmup, "seed": args.seed,
             "machine": platform.platform(), "processor": platform.processor(),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }

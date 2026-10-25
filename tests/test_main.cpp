@@ -218,6 +218,37 @@ int main() {
          "column-aligned Flink warning levels should be counted");
   std::filesystem::remove(padded_flink_path);
 
+  const auto xmp_mention_path =
+      std::filesystem::temp_directory_path() / "log-analyzer-xmp-mention.log";
+  {
+    std::ofstream file(xmp_mention_path, std::ios::binary);
+    file << "26/08/20 07:24:02.012 Driver INFO SparkUI: Rendering <xmp> log view\n";
+    file << "26/08/20 07:24:03.013 Driver INFO SparkUI: Log view rendered\n";
+  }
+  const auto xmp_mention_result =
+      analyze_file(xmp_mention_path, AnalyzeOptions{});
+  expect(xmp_mention_result.container_format == "plain-text" &&
+             xmp_mention_result.events == 2,
+         "a plain log that mentions <xmp> should not be unwrapped as HTML");
+  std::filesystem::remove(xmp_mention_path);
+
+  // Padding lengths around the 64-byte skip block.
+  for (const std::size_t padding : {63, 64, 65, 130}) {
+    const auto padded_path =
+        std::filesystem::temp_directory_path() / "log-analyzer-odd-padding.log";
+    {
+      std::ofstream file(padded_path, std::ios::binary);
+      file << std::string(padding, '\0');
+      file << "26/08/20 07:24:02.012 Driver INFO SparkUI: first\n";
+      file << "26/08/20 07:24:03.013 Driver INFO SparkUI: second\n";
+    }
+    const auto padded_result = analyze_file(padded_path, AnalyzeOptions{});
+    expect(padded_result.container_format == "nul-padded-text" &&
+               padded_result.events == 2 && padded_result.malformed == 0,
+           "leading NUL padding of any length should be skipped exactly");
+    std::filesystem::remove(padded_path);
+  }
+
   const auto padded_halves_path =
       std::filesystem::temp_directory_path() / "log-analyzer-padded-halves.log";
   {

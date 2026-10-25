@@ -9,6 +9,19 @@
 namespace log_analyzer {
 namespace {
 
+// The program never sets a locale, so the "C" locale applies and these match
+// std::isspace, std::isdigit, std::isalnum and std::tolower exactly, without a
+// library call per character.
+constexpr bool is_ascii_space(unsigned char ch) {
+  return ch == ' ' || (ch >= '\t' && ch <= '\r');
+}
+
+constexpr bool is_ascii_digit(unsigned char ch) { return ch >= '0' && ch <= '9'; }
+
+constexpr char to_ascii_lower(char ch) {
+  return ch >= 'A' && ch <= 'Z' ? static_cast<char>(ch - 'A' + 'a') : ch;
+}
+
 std::string root_cause_line(std::string_view message, std::string_view stack) {
   std::string candidate(message);
   std::string first_frame;
@@ -17,9 +30,9 @@ std::string root_cause_line(std::string_view message, std::string_view stack) {
     const auto end = stack.find('\n', position);
     auto line = stack.substr(position, end == std::string_view::npos ? stack.size() - position
                                                                     : end - position);
-    while (!line.empty() && std::isspace(static_cast<unsigned char>(line.front())))
+    while (!line.empty() && is_ascii_space(static_cast<unsigned char>(line.front())))
       line.remove_prefix(1);
-    while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back())))
+    while (!line.empty() && is_ascii_space(static_cast<unsigned char>(line.back())))
       line.remove_suffix(1);
     const auto caused = line.find("Caused by:");
     if (caused != std::string_view::npos) {
@@ -39,7 +52,8 @@ std::string root_cause_line(std::string_view message, std::string_view stack) {
 }
 
 bool is_word_character(unsigned char ch) {
-  return std::isalnum(ch) || ch == '_';
+  return is_ascii_digit(ch) || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+         ch == '_';
 }
 
 bool has_word_start(std::string_view value, std::size_t position) {
@@ -53,16 +67,15 @@ bool has_word_end(std::string_view value, std::size_t position) {
 }
 
 bool is_hexadecimal(unsigned char ch) {
-  return std::isdigit(ch) || (ch >= 'a' && ch <= 'f');
+  return is_ascii_digit(ch) || (ch >= 'a' && ch <= 'f');
 }
 
 std::size_t uuid_length_at(std::string_view value, std::size_t position) {
-  static constexpr std::array<std::size_t, 4> hyphens{8, 13, 18, 23};
   constexpr std::size_t length = 36;
   if (!has_word_start(value, position) || position + length > value.size())
     return 0;
   for (std::size_t index = 0; index < length; ++index) {
-    if (std::find(hyphens.begin(), hyphens.end(), index) != hyphens.end()) {
+    if (index == 8 || index == 13 || index == 18 || index == 23) {
       if (value[position + index] != '-') return 0;
     } else if (!is_hexadecimal(
                    static_cast<unsigned char>(value[position + index]))) {
@@ -97,7 +110,7 @@ std::size_t ipv4_length_at(std::string_view value, std::size_t position) {
   for (int segment = 0; segment < 4; ++segment) {
     const auto start = cursor;
     while (cursor < value.size() && cursor - start < 3 &&
-           std::isdigit(static_cast<unsigned char>(value[cursor])))
+           is_ascii_digit(static_cast<unsigned char>(value[cursor])))
       ++cursor;
     if (cursor == start) return 0;
     if (segment < 3) {
@@ -110,53 +123,76 @@ std::size_t ipv4_length_at(std::string_view value, std::size_t position) {
 
 std::size_t number_length_at(std::string_view value, std::size_t position) {
   if (!has_word_start(value, position) ||
-      !std::isdigit(static_cast<unsigned char>(value[position])))
+      !is_ascii_digit(static_cast<unsigned char>(value[position])))
     return 0;
   auto cursor = position;
   while (cursor < value.size() &&
-         std::isdigit(static_cast<unsigned char>(value[cursor])))
+         is_ascii_digit(static_cast<unsigned char>(value[cursor])))
     ++cursor;
   if (cursor + 1 < value.size() && value[cursor] == '.' &&
-      std::isdigit(static_cast<unsigned char>(value[cursor + 1]))) {
+      is_ascii_digit(static_cast<unsigned char>(value[cursor + 1]))) {
     ++cursor;
     while (cursor < value.size() &&
-           std::isdigit(static_cast<unsigned char>(value[cursor])))
+           is_ascii_digit(static_cast<unsigned char>(value[cursor])))
       ++cursor;
   }
   return has_word_end(value, cursor) ? cursor - position : 0;
 }
 
+// Every pattern begins at a word start with a digit or a-f and ends at a word
+// end. So the matchers run only at such word starts, and any other word, or
+// the rest of a word no pattern matched, is copied in one step.
+std::size_t pattern_length_at(std::string_view value, std::size_t position,
+                              std::string_view& replacement) {
+  const auto ch = static_cast<unsigned char>(value[position]);
+  if (!is_hexadecimal(ch) || !has_word_start(value, position)) return 0;
+  if (const auto length = uuid_length_at(value, position); length > 0) {
+    replacement = "<uuid>";
+    return length;
+  }
+  if (const auto length = hex_address_length_at(value, position); length > 0) {
+    replacement = "<addr>";
+    return length;
+  }
+  if (const auto length = ipv4_length_at(value, position); length > 0) {
+    replacement = "<ip>";
+    return length;
+  }
+  if (const auto length = number_length_at(value, position); length > 0) {
+    replacement = "<n>";
+    return length;
+  }
+  return 0;
+}
+
 std::string normalize_dynamic_values(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(),
-                 [](unsigned char ch) {
-                   return static_cast<char>(std::tolower(ch));
-                 });
+  for (auto& ch : value) ch = to_ascii_lower(ch);
 
   std::string normalized;
   normalized.reserve(value.size());
-  for (std::size_t cursor = 0; cursor < value.size();) {
-    const auto append_replacement =
-        [&](std::size_t length, std::string_view replacement) {
-          normalized.append(replacement);
-          cursor += length;
-        };
-
-    if (const auto length = uuid_length_at(value, cursor); length > 0) {
-      append_replacement(length, "<uuid>");
-    } else if (const auto length = hex_address_length_at(value, cursor);
-               length > 0) {
-      append_replacement(length, "<addr>");
-    } else if (const auto length = ipv4_length_at(value, cursor); length > 0) {
-      append_replacement(length, "<ip>");
-    } else if (const auto length = number_length_at(value, cursor);
-               length > 0) {
-      append_replacement(length, "<n>");
-    } else if (std::isspace(static_cast<unsigned char>(value[cursor]))) {
+  const std::string_view text(value);
+  for (std::size_t cursor = 0; cursor < text.size();) {
+    const auto ch = static_cast<unsigned char>(text[cursor]);
+    if (is_word_character(ch)) {
+      std::string_view replacement;
+      if (const auto length = pattern_length_at(text, cursor, replacement);
+          length > 0) {
+        normalized.append(replacement);
+        cursor += length;
+        continue;
+      }
+      auto word_end = cursor + 1;
+      while (word_end < text.size() &&
+             is_word_character(static_cast<unsigned char>(text[word_end])))
+        ++word_end;
+      normalized.append(text.substr(cursor, word_end - cursor));
+      cursor = word_end;
+    } else if (is_ascii_space(ch)) {
       if (!normalized.empty() && normalized.back() != ' ')
         normalized.push_back(' ');
       ++cursor;
     } else {
-      normalized.push_back(value[cursor]);
+      normalized.push_back(text[cursor]);
       ++cursor;
     }
   }
