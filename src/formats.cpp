@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -226,8 +227,27 @@ bool looks_like_app_header(std::string_view line) {
          time.size() >= 12 && time[2] == ':' && time[5] == ':';
 }
 
-bool parse_spark_header(std::string_view line, std::string_view default_timezone,
-                        LogRecord* record) {
+// Header fields as views into the source line. Framing scans each line once
+// into one of these, and the decoder builds the record from it, so a header
+// line is never parsed a second time.
+struct SparkHeader {
+  std::string_view timestamp;
+  std::string_view thread;
+  std::string_view level;
+  std::string_view logger;
+  std::string_view message;
+};
+
+struct FlinkHeader {
+  std::string_view timestamp;
+  std::string_view level;
+  std::string_view logger;
+  std::string_view thread;
+  std::string_view message;
+  bool full_year = false;
+};
+
+bool scan_spark_header(std::string_view line, SparkHeader& header) {
   if (line.size() < 27 || line[2] != '/' || line[5] != '/' || line[8] != ' ' ||
       line[11] != ':' || line[14] != ':' || line[17] != '.')
     return false;
@@ -251,21 +271,35 @@ bool parse_spark_header(std::string_view line, std::string_view default_timezone
   const auto logger_start = level_position + level.size() + 2;
   const auto colon = remainder.find(':', logger_start);
   if (colon == std::string_view::npos) return false;
-  if (!record) return true;
 
-  record->timestamp = normalize_short_year_timestamp(timestamp, default_timezone);
-  record->thread = std::string(trim_view(remainder.substr(0, level_position)));
-  record->severity = std::string(level);
-  record->logger =
-      std::string(trim_view(remainder.substr(logger_start, colon - logger_start)));
-  record->source = record->logger;
-  record->service = "spark";
-  record->message = std::string(trim_view(remainder.substr(colon + 1)));
+  header.timestamp = timestamp;
+  header.thread = trim_view(remainder.substr(0, level_position));
+  header.level = level;
+  header.logger = trim_view(remainder.substr(logger_start, colon - logger_start));
+  header.message = trim_view(remainder.substr(colon + 1));
   return true;
 }
 
-bool parse_flink_header(std::string_view line, std::string_view default_timezone,
+void fill_spark_record(const SparkHeader& header, std::string_view default_timezone,
+                       LogRecord& record) {
+  record.timestamp = normalize_short_year_timestamp(header.timestamp, default_timezone);
+  record.thread = std::string(header.thread);
+  record.severity = std::string(header.level);
+  record.logger = std::string(header.logger);
+  record.source = record.logger;
+  record.service = "spark";
+  record.message = std::string(header.message);
+}
+
+bool parse_spark_header(std::string_view line, std::string_view default_timezone,
                         LogRecord* record) {
+  SparkHeader header;
+  if (!scan_spark_header(line, header)) return false;
+  if (record) fill_spark_record(header, default_timezone, *record);
+  return true;
+}
+
+bool scan_flink_header(std::string_view line, FlinkHeader& header) {
   while (!line.empty() && (line.front() == ' ' || line.front() == '\t'))
     line.remove_prefix(1);
 
@@ -295,17 +329,12 @@ bool parse_flink_header(std::string_view line, std::string_view default_timezone
     std::size_t context_cursor = 0;
     const auto logger = take_token(context, context_cursor);
     if (logger.empty()) return false;
-    const auto thread = trim_view(context.substr(context_cursor));
-    if (!record) return true;
-
-    record->timestamp =
-        normalize_full_year_timestamp(timestamp, default_timezone);
-    record->severity = std::string(level);
-    record->logger = std::string(logger);
-    record->source = record->logger;
-    record->thread = std::string(thread);
-    record->service = "flink";
-    record->message = std::string(trim_view(remainder.substr(message_start)));
+    header.timestamp = timestamp;
+    header.level = level;
+    header.logger = logger;
+    header.thread = trim_view(context.substr(context_cursor));
+    header.message = trim_view(remainder.substr(message_start));
+    header.full_year = true;
     return true;
   }
 
@@ -324,15 +353,35 @@ bool parse_flink_header(std::string_view line, std::string_view default_timezone
     ++cursor;
   const auto colon = remainder.find(':', cursor);
   if (colon == std::string_view::npos || colon == cursor) return false;
-  if (!record) return true;
 
-  record->timestamp =
-      normalize_short_year_timestamp(timestamp, default_timezone);
-  record->severity = std::string(level);
-  record->logger = std::string(trim_view(remainder.substr(cursor, colon - cursor)));
-  record->source = record->logger;
-  record->service = "flink";
-  record->message = std::string(trim_view(remainder.substr(colon + 1)));
+  header.timestamp = timestamp;
+  header.level = level;
+  header.logger = trim_view(remainder.substr(cursor, colon - cursor));
+  header.thread = {};
+  header.message = trim_view(remainder.substr(colon + 1));
+  header.full_year = false;
+  return true;
+}
+
+void fill_flink_record(const FlinkHeader& header, std::string_view default_timezone,
+                       LogRecord& record) {
+  record.timestamp =
+      header.full_year
+          ? normalize_full_year_timestamp(header.timestamp, default_timezone)
+          : normalize_short_year_timestamp(header.timestamp, default_timezone);
+  record.severity = std::string(header.level);
+  record.logger = std::string(header.logger);
+  record.source = record.logger;
+  record.thread = std::string(header.thread);
+  record.service = "flink";
+  record.message = std::string(header.message);
+}
+
+bool parse_flink_header(std::string_view line, std::string_view default_timezone,
+                        LogRecord* record) {
+  FlinkHeader header;
+  if (!scan_flink_header(line, header)) return false;
+  if (record) fill_flink_record(header, default_timezone, *record);
   return true;
 }
 
@@ -464,17 +513,32 @@ std::string_view canonical_java_logging_level(std::string_view level) {
 
 enum class SchedulerLine { none, scheduler, log4j, spark_console, java_logging };
 
-SchedulerLine scheduler_line_kind(std::string_view line) {
-  if (parse_scheduler_header(line, {}, nullptr)) return SchedulerLine::scheduler;
-  if (parse_spark_header(line, {}, nullptr)) return SchedulerLine::spark_console;
-  if (parse_flink_header(line, {}, nullptr)) {
+// Spark and log4j task lines keep the header found while classifying them.
+// Scheduler and java.util.logging headers are parsed again when decoding.
+struct SchedulerHeader {
+  SchedulerLine kind = SchedulerLine::none;
+  bool spark_layout = false;
+  SparkHeader spark;
+  FlinkHeader flink;
+};
+
+bool scan_scheduler_line(std::string_view line, SchedulerHeader& header) {
+  header.spark_layout = false;
+  if (parse_scheduler_header(line, {}, nullptr)) {
+    header.kind = SchedulerLine::scheduler;
+  } else if (scan_spark_header(line, header.spark)) {
+    header.kind = SchedulerLine::spark_console;
+    header.spark_layout = true;
+  } else if (scan_flink_header(line, header.flink)) {
     const auto start = line.find_first_not_of(" \t");
-    return line[start + 2] == '/' ? SchedulerLine::spark_console
-                                  : SchedulerLine::log4j;
+    header.kind = line[start + 2] == '/' ? SchedulerLine::spark_console
+                                         : SchedulerLine::log4j;
+  } else if (parse_java_logging_header(line, {}, nullptr)) {
+    header.kind = SchedulerLine::java_logging;
+  } else {
+    header.kind = SchedulerLine::none;
   }
-  if (parse_java_logging_header(line, {}, nullptr))
-    return SchedulerLine::java_logging;
-  return SchedulerLine::none;
+  return header.kind != SchedulerLine::none;
 }
 
 InputFormat detect_format(std::string_view content, InputFormat requested) {
@@ -518,13 +582,19 @@ InputFormat detect_format(std::string_view content, InputFormat requested) {
       "could not detect input format; use --input-format to select one explicitly");
 }
 
-template <typename Predicate, typename Consumer>
+struct NoHeader {};
+
+// scan_start(line, header) reports whether the line starts an event and fills
+// header with its fields; consume receives the span and that same header.
+template <typename Header, typename Scanner, typename Consumer>
 void for_each_event(std::string_view content, std::size_t base_offset,
-                    Predicate is_start, Consumer consume,
+                    Scanner scan_start, Consumer consume,
                     DecodedInput& decoded) {
   std::size_t cursor = 0;
   std::size_t event_start = std::string_view::npos;
   std::size_t header_end = 0;
+  Header current{};
+  Header candidate{};
 
   const auto flush = [&](std::size_t event_end) {
     if (event_start == std::string_view::npos) return;
@@ -536,7 +606,8 @@ void for_each_event(std::string_view content, std::size_t base_offset,
     ++decoded.logical_events;
     consume(EventSpan{base_offset + event_start, header,
                       content.substr(continuation_start,
-                                     event_end - continuation_start)});
+                                     event_end - continuation_start)},
+            current);
   };
 
   while (cursor < content.size()) {
@@ -546,8 +617,9 @@ void for_each_event(std::string_view content, std::size_t base_offset,
     auto line = content.substr(line_start, line_end - line_start);
     if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
     ++decoded.physical_lines;
-    if (is_start(line)) {
+    if (scan_start(line, candidate)) {
       flush(line_start);
+      current = candidate;
       event_start = line_start;
       header_end = line_end;
     } else if (event_start != std::string_view::npos) {
@@ -1063,11 +1135,12 @@ std::uint64_t count_nonblank_lines(std::string_view text) {
   return count;
 }
 
-bool decode_scheduler_event(const EventSpan& event, const AnalyzeOptions& options,
+bool decode_scheduler_event(const EventSpan& event, const SchedulerHeader& header,
+                            const AnalyzeOptions& options,
                             DecodedInput& decoded, LogRecord& record) {
   record.offset = event.offset;
   const auto timezone = std::string_view(options.default_timezone);
-  const auto kind = scheduler_line_kind(event.header);
+  const auto kind = header.kind;
   if (kind == SchedulerLine::none) return false;
 
   if (kind == SchedulerLine::scheduler) {
@@ -1103,11 +1176,13 @@ bool decode_scheduler_event(const EventSpan& event, const AnalyzeOptions& option
     }
   } else if (kind == SchedulerLine::spark_console) {
     task_format = "spark-console";
-    if (!parse_spark_header(event.header, timezone, &record))
-      parse_flink_header(event.header, timezone, &record);
+    if (header.spark_layout)
+      fill_spark_record(header.spark, timezone, record);
+    else
+      fill_flink_record(header.flink, timezone, record);
   } else {
     task_format = "log4j";
-    parse_flink_header(event.header, timezone, &record);
+    fill_flink_record(header.flink, timezone, record);
     // Keep fractional seconds comparable with scheduler timestamps.
     if (record.timestamp.size() > 19 && record.timestamp[19] == ',')
       record.timestamp[19] = '.';
@@ -1155,10 +1230,10 @@ DecodedInput decode_framed(std::string_view content, std::size_t base_offset,
   if (format == InputFormat::jsonl) {
     decode_jsonl(content, base_offset, options, decoded, emit);
   } else if (format == InputFormat::app_export || format == InputFormat::logback) {
-    for_each_event(
+    for_each_event<NoHeader>(
         content, base_offset,
-        [](std::string_view line) { return looks_like_app_header(line); },
-        [&](const EventSpan& span) {
+        [](std::string_view line, NoHeader&) { return looks_like_app_header(line); },
+        [&](const EventSpan& span, const NoHeader&) {
           LogRecord record;
           if (decode_application_event(span, format, record))
             emit(std::move(record));
@@ -1168,19 +1243,15 @@ DecodedInput decode_framed(std::string_view content, std::size_t base_offset,
         decoded);
   } else if (format == InputFormat::spark_syslog) {
     std::string application_id;
-    for_each_event(
+    for_each_event<SparkHeader>(
         content, base_offset,
-        [&](std::string_view line) {
-          return parse_spark_header(line, options.default_timezone, nullptr);
+        [](std::string_view line, SparkHeader& header) {
+          return scan_spark_header(line, header);
         },
-        [&](const EventSpan& span) {
+        [&](const EventSpan& span, const SparkHeader& header) {
           LogRecord record;
           record.offset = span.offset;
-          if (!parse_spark_header(span.header, options.default_timezone,
-                                  &record)) {
-            ++decoded.malformed;
-            return;
-          }
+          fill_spark_record(header, options.default_timezone, record);
           record.stack_trace = continuation_text(span.continuation);
           record.exception = has_exception_line(record.stack_trace);
           auto found_application =
@@ -1198,19 +1269,15 @@ DecodedInput decode_framed(std::string_view content, std::size_t base_offset,
         },
         decoded);
   } else if (format == InputFormat::flink_console) {
-    for_each_event(
+    for_each_event<FlinkHeader>(
         content, base_offset,
-        [&](std::string_view line) {
-          return parse_flink_header(line, options.default_timezone, nullptr);
+        [](std::string_view line, FlinkHeader& header) {
+          return scan_flink_header(line, header);
         },
-        [&](const EventSpan& span) {
+        [&](const EventSpan& span, const FlinkHeader& header) {
           LogRecord record;
           record.offset = span.offset;
-          if (!parse_flink_header(span.header, options.default_timezone,
-                                  &record)) {
-            ++decoded.malformed;
-            return;
-          }
+          fill_flink_record(header, options.default_timezone, record);
           record.stack_trace = continuation_text(span.continuation);
           record.exception =
               has_exception_line(record.stack_trace) ||
@@ -1220,14 +1287,14 @@ DecodedInput decode_framed(std::string_view content, std::size_t base_offset,
         },
         decoded);
   } else if (format == InputFormat::scheduler) {
-    for_each_event(
+    for_each_event<SchedulerHeader>(
         content, base_offset,
-        [](std::string_view line) {
-          return scheduler_line_kind(line) != SchedulerLine::none;
+        [](std::string_view line, SchedulerHeader& header) {
+          return scan_scheduler_line(line, header);
         },
-        [&](const EventSpan& span) {
+        [&](const EventSpan& span, const SchedulerHeader& header) {
           LogRecord record;
-          if (decode_scheduler_event(span, options, decoded, record))
+          if (decode_scheduler_event(span, header, options, decoded, record))
             emit(std::move(record));
           else
             ++decoded.malformed;
@@ -1262,12 +1329,46 @@ std::string_view input_format_name(InputFormat format) {
   return "unknown";
 }
 
+namespace {
+
+// Preallocated log files can carry tens of megabytes of leading NUL padding,
+// so it is skipped 64 bytes per step rather than one byte at a time.
+std::size_t skip_nul_padding(std::string_view input) {
+  constexpr std::size_t block = 64;
+  std::size_t position = 0;
+  while (position + block <= input.size()) {
+    std::uint64_t any = 0;
+    for (std::size_t word = 0; word < block; word += sizeof(std::uint64_t)) {
+      std::uint64_t value = 0;
+      std::memcpy(&value, input.data() + position + word, sizeof(value));
+      any |= value;
+    }
+    if (any != 0) break;
+    position += block;
+  }
+  while (position < input.size() && input[position] == '\0') ++position;
+  return position;
+}
+
+}  // namespace
+
 ContainerView unwrap_container(std::string_view input) {
-  const auto xmp = input.find("<xmp");
+  const auto content_start = skip_nul_padding(input);
+  if (content_start == input.size()) return {{}, input.size(), "nul-padded-text"};
+
+  // A browser-saved page starts with markup, while a log starts with its
+  // first record. Deciding from the first visible byte keeps plain logs from
+  // being scanned end to end for a "<xmp" they do not contain.
+  constexpr std::string_view utf8_bom = "\xEF\xBB\xBF";
+  auto first_visible = content_start;
+  while (first_visible < input.size() &&
+         std::isspace(static_cast<unsigned char>(input[first_visible])))
+    ++first_visible;
+  const auto head = input.substr(first_visible);
+  const bool starts_with_markup = head.starts_with('<') || head.starts_with(utf8_bom);
+  const auto xmp =
+      starts_with_markup ? input.find("<xmp", first_visible) : std::string_view::npos;
   if (xmp == std::string_view::npos) {
-    const auto content_start = input.find_first_not_of('\0');
-    if (content_start == std::string_view::npos)
-      return {{}, input.size(), "nul-padded-text"};
     if (content_start > 0)
       return {input.substr(content_start), content_start, "nul-padded-text"};
     return {input, 0, "plain-text"};
